@@ -1,0 +1,122 @@
+#ifndef SLIPPI_ROOMS_H
+#define SLIPPI_ROOMS_H
+
+#include "../../m-ex/MexTK/mex.h"
+
+// The frame of ToyFigurePanel's animation where the trophy list is fully in view
+#define PANEL_LIST_FRAME 22
+
+// ToyFigurePanel joints, numbered depth first. The pills are listed right to
+// left, and each has one child whose first DOBJ is the pill and second is the word
+#define PANEL_HEADER_JOINT 1
+#define PANEL_COUNTER_JOINT 2
+#define PANEL_SIDE_LABEL_JOINT 13
+#define PANEL_ROW_1_JOINT 15
+#define PANEL_ROW_2_JOINT 16
+#define PANEL_PILL_RIGHT 17
+#define PANEL_PILL_MIDDLE 19
+#define PANEL_PILL_LEFT 21
+#define PANEL_SERIES_JOINT 23
+
+// ToyFigureListBase's second joint is the trophy's series logo
+#define ROW_SERIES_JOINT 1
+
+// Melee's trophy list draws each row's text in the scene through its own camera,
+// at these offsets and scales from the row (tylist, 0x80312904)
+#define ROW_TEXT_GXLINK 5
+#define ROW_TEXT_Y 0.41
+#define ROW_NAME_X -6.5
+#define ROW_NAME_SCALE_X 0.028
+#define ROW_COUNT_SCALE_X 0.038
+#define ROW_TEXT_SCALE_Y 0.029
+#define ROW_NAME_WIDTH 640
+#define ROW_COUNT_WIDTH 192
+#define ROW_TEXT_HEIGHT 64
+
+// Rooms puts the code where the trophy's series logo was, the region after the
+// host, the mode before the count, and the count right aligned to the end of its
+// box. Counts of 10 and up are drawn narrower to fit the box
+#define ROW_CODE_X -9.45
+#define ROW_REGION_X 0.5
+#define ROW_MODE_X 3.5
+#define ROW_COUNT_X 11.1
+#define ROW_COUNT_LONG_SCALE_X 0.030
+
+#define PILL_COUNT 5
+#define PILL_SCALE 0.817
+#define PILL_SHIFT 0.149
+#define LIST_ROWS 9
+
+typedef enum Rooms_Focus {
+  Rooms_Focus_LIST,
+  Rooms_Focus_PILLS,
+} Rooms_Focus;
+
+typedef enum Rooms_PillRow {
+  Rooms_PillRow_MAIN,
+  Rooms_PillRow_MODE,
+  Rooms_PillRow_REGION,
+} Rooms_PillRow;
+
+typedef enum Rooms_MainPill {
+  Rooms_MainPill_CREATE,
+  Rooms_MainPill_JOIN,
+  Rooms_MainPill_MODE,
+  Rooms_MainPill_REGION,
+  Rooms_MainPill_RANDOM,
+} Rooms_MainPill;
+
+typedef struct Rooms_Room {
+  char *code;
+  char *host;
+  u8 mode;
+  u8 region;
+  u8 players;
+  u8 capacity;
+} Rooms_Room;
+
+typedef struct Rooms_Data {
+  Text *pill_text;
+  int pill_subtexts[PILL_COUNT];
+  JOBJ *pills[PILL_COUNT];
+  int row_canvas;
+  Text *name_text[LIST_ROWS];
+  Text *mode_text[LIST_ROWS];
+  Text *size_text[LIST_ROWS];
+  Text *empty_text;
+  JOBJ *rows[LIST_ROWS];
+  JOBJ *cursor;
+  JOBJ *list_end;
+  Vec3 row_pos;
+  Vec3 row_step;
+  Rooms_Focus focus;
+  Rooms_PillRow pill_row;
+  int pill_idx;
+  int row_idx;
+  int visible[LIST_ROWS];
+  int visible_count;
+  u8 mode_filter;
+  u8 region_filter;
+  u8 should_exit;
+} Rooms_Data;
+
+GOBJ *LoadModel(char *joint, char *animjoint, char *matanimjoint);
+JOBJ *FreezeModel(GOBJ *gobj, float frame);
+JOBJ *LoadPanel();
+JOBJ *GetJoint(JOBJ *root, int index);
+void SetLabel(DOBJ *dobj, char *image);
+void HideJoint(JOBJ *jobj);
+JOBJ *InitPill(JOBJ *panel, int joint, float x, float scale);
+void InitRows(JOBJ *panel);
+Text *CreateRowText(int row, float x, float scale_x, float width);
+void SetRowPos(JOBJ *jobj, float row);
+u8 IsPillOn(int idx);
+void UpdatePills();
+void UpdateList();
+void PlayAlert();
+void HandlePillPress();
+void CObjThink(GOBJ *gobj);
+void TextCObjThink(GOBJ *gobj);
+void InputsThink(GOBJ *gobj);
+
+#endif  // SLIPPI_ROOMS_H
