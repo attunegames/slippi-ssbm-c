@@ -6,7 +6,7 @@ static HSD_Archive *trophy_archive;
 static HSD_Archive *gui_archive;
 static Rooms_Data *data;
 
-// Public rooms, filled in once the list comes from the server
+// Public rooms. Empty until the list is fetched from the server
 static Rooms_Room rooms[LIST_ROWS];
 static int room_count = 0;
 
@@ -18,10 +18,11 @@ static char *join_labels[JOIN_PILL_COUNT] = {"Join", "Cancel"};
 
 static char *visibility_labels[] = {"Public", "Private"};
 static char *size_labels[] = {"2", "4", "8", "16", "32", "No limit"};
+static u8 size_values[] = {2, 4, 8, 16, 32, 0};
 static char *stage_labels[] = {"Random", "Draft"};
 
-// The create form's settings, top to bottom. The modes and sizes are drawn narrower
-// to fit their bars. Sizes and stage picks are the Singles set for now
+// Create form settings, in Rooms_Setting order. Modes and sizes are drawn narrower to fit
+// their bars
 static Rooms_SettingInfo settings[CREATE_SETTINGS] = {
     {"VISIBILITY", visibility_labels, 2, ROW_NAME_SCALE_X},
     {"MODE", mode_labels, PILL_COUNT, CREATE_NARROW_SCALE_X},
@@ -37,26 +38,28 @@ const GXColor pill_on = {255, 220, 60, 255};
 const GXColor pill_hover = {255, 255, 255, 255};
 const GXColor pill_hover_on = {255, 255, 170, 255};
 
-// The trophy list's text colors: black on the selected row, white on the rest
+// Same row colors as the trophy list
 const GXColor row_color = {255, 255, 255, 255};
 const GXColor row_selected_color = {0, 0, 0, 255};
 
-// The form labels match the panel's green, and the choices not picked are dimmed
+// Form labels use the panel's green, and unselected choices are dimmed
 const GXColor label_color = {150, 215, 140, 255};
 const GXColor unchosen_color = {70, 70, 80, 255};
 const GXColor unchosen_selected_row_color = {150, 150, 160, 255};
 
-void minor_load(void *minor_data) {
+void minor_load(Rooms_SceneData *minor_data) {
   data = calloc(sizeof(Rooms_Data));
+  data->scene_data = minor_data;
+  minor_data->enter_room = false;
 
   // Set up input handler. Initialize at top to make sure it runs before anything else
   GOBJ *input_handler_gobj = GObj_Create(4, 0, 128);
   GObj_AddProc(input_handler_gobj, InputsThink, 0);
 
-  // The trophy gallery's list screen, straight from the disc
+  // Load the trophy gallery's list screen from the disc
   trophy_archive = Archive_LoadFile("TyMnView.usd");
 
-  // Rooms' own header and side label
+  // Load the rooms header and side label
   gui_archive = Archive_LoadFile("Rooms_gui.dat");
 
   GOBJ *cam_gobj = GObj_Create(2, 3, 128);
@@ -67,8 +70,7 @@ void minor_load(void *minor_data) {
   // Indicates which gx_links to render
   cam_gobj->cobj_links = (1 << 0) + (1 << 1) + (1 << 2) + (1 << 3) + (1 << 4);
 
-  // The trophy list draws its row text in the scene through a second copy of the
-  // camera, which renders only the text, after everything else
+  // Like the trophy list, row text is drawn by a second camera after everything else
   GOBJ *text_cam_gobj = GObj_Create(2, 3, 128);
   COBJ *text_cam_cobj = COBJ_LoadDesc(Archive_GetPublicAddress(trophy_archive, "ScMenFigure_cam_int1_camera"));
   GObj_AddObject(text_cam_gobj, 1, text_cam_cobj);
@@ -85,8 +87,8 @@ void minor_load(void *minor_data) {
   // create background
   LoadModel("ToyFigureBack_Top_joint", "ToyFigureBack_Top_animjoint", "ToyFigureBack_Top_matanim_joint");
 
-  // A second panel supplies pills four and five. Everything else on it is hidden.
-  // Pills overlap their right neighbour, so the rightmost ones have to be drawn first
+  // Load a second panel for pills four and five, hiding everything else on it. Pills
+  // overlap their right neighbor, so the rightmost ones need to be drawn first
   JOBJ *extra = LoadPanel();
   for (int i = 1; i <= PANEL_SERIES_JOINT; i++) {
     if (i >= PANEL_PILL_RIGHT && i <= PANEL_PILL_MIDDLE + 1) {
@@ -95,21 +97,19 @@ void minor_load(void *minor_data) {
     HideJoint(GetJoint(extra, i));
   }
 
-  // Frame and list panel, without the trophy counter or series logo
+  // Load the list panel without the trophy counter or series logo
   JOBJ *panel = LoadPanel();
   HideJoint(GetJoint(panel, PANEL_COUNTER_JOINT));
   HideJoint(GetJoint(panel, PANEL_SERIES_JOINT));
 
-  // "Online Play | Rooms" and "PUBLIC" in place of "Trophies | Gallery" and "TROPHY LIST".
-  // Only this screen's copy changes, so the trophy gallery itself is untouched
+  // Replace the header and side label images. Only this scene's copy is changed
   DOBJ *header = GetJoint(panel, PANEL_HEADER_JOINT)->dobj;
   SetLabel(header->next, "RoomsHeaderLeft_image");
   SetLabel(header->next->next, "RoomsHeaderRight_image");
   data->side_label = GetJoint(panel, PANEL_SIDE_LABEL_JOINT);
   SetLabel(data->side_label->dobj, "RoomsSideLabel_image");
 
-  // Five pills where the trophy screen has three, stretched to where its counter
-  // ended and with the same margin at both ends of the bar
+  // Spread five pills across the bar where the trophy screen has three
   float gap = GetJoint(panel, PANEL_PILL_MIDDLE)->trans.X - GetJoint(panel, PANEL_PILL_LEFT)->trans.X;
   float first = GetJoint(panel, PANEL_PILL_LEFT)->trans.X - PILL_SHIFT * gap;
   float step = PILL_SCALE * gap;
@@ -121,7 +121,7 @@ void minor_load(void *minor_data) {
 
   InitRows(panel);
 
-  // Pill labels, drawn in front of the pills and centered on each one
+  // Init pill labels, in front of the pills
   data->pill_text = Text_CreateText(0, 0);
   data->pill_text->kerning = 1;
   data->pill_text->align = 1;
@@ -129,8 +129,8 @@ void minor_load(void *minor_data) {
   data->pill_text->scale = (Vec2){0.01, 0.01};
   data->pill_text->trans.Z = 5;
   for (int i = 0; i < PILL_COUNT; i++) {
-    data->pill_subtexts[i] = Text_AddSubtext(data->pill_text, -1922 + i * 842, 1285, "");
-    Text_SetScale(data->pill_text, data->pill_subtexts[i], 3.8, 3.8);
+    data->pill_subtext_ids[i] = Text_AddSubtext(data->pill_text, -1922 + i * 842, 1285, "");
+    Text_SetScale(data->pill_text, data->pill_subtext_ids[i], 3.8, 3.8);
   }
 
   data->focus = Rooms_Focus_LIST;
@@ -144,7 +144,7 @@ void minor_think() {
   }
 }
 
-void minor_exit(void *minor_data) {
+void minor_exit(Rooms_SceneData *minor_data) {
 }
 
 GOBJ *LoadModel(char *joint, char *animjoint, char *matanimjoint) {
@@ -163,11 +163,11 @@ GOBJ *LoadModel(char *joint, char *animjoint, char *matanimjoint) {
 
   set->shapeaninjoint = calloc(sizeof(void *) * 2);
 
-  // gx_link 0 so every model is drawn before the text
+  // Use gx_link 0 so every model is drawn before the text
   return JOBJ_LoadSet(0, set, 0, 0, 3, 0, 1, GObj_Anim);
 }
 
-// Holds a model on one frame of its animation
+// Stops a model's animation on the given frame
 JOBJ *FreezeModel(GOBJ *gobj, float frame) {
   GObj_RemoveProc(gobj);
 
@@ -177,13 +177,13 @@ JOBJ *FreezeModel(GOBJ *gobj, float frame) {
   return jobj;
 }
 
-// The trophy panel, held on the frame where the list is fully in view
+// Loads the trophy panel, frozen where the list is fully in view
 JOBJ *LoadPanel() {
   GOBJ *gobj = LoadModel("ToyFigurePanel_Top_joint", "ToyFigurePanel_Top_animjoint", "ToyFigurePanel_Top_matanim_joint");
   return FreezeModel(gobj, PANEL_LIST_FRAME);
 }
 
-// Joints are numbered depth first, the same order HSDRawViewer lists them in
+// Index is depth first, the same order HSDRawViewer lists joints in
 JOBJ *GetJoint(JOBJ *root, int index) {
   JOBJ *jobj = 0;
   JOBJ_GetChild(root, &jobj, index, -1);
@@ -220,15 +220,15 @@ JOBJ *InitPill(JOBJ *panel, int joint, float x, float scale) {
   jobj->scale.X = scale;
   JOBJ_SetMtxDirtySub(jobj);
 
-  // The word is drawn as text instead, so it can be anything
+  // Hide the pill's word, the label is drawn as text instead
   DOBJ *shape = jobj->child->dobj;
   shape->next->flags |= DOBJ_HIDDEN;
 
-  // The child holds the pill's look, which the trophy screen switches by frame
+  // The child holds the pill's animation, which switches its look by frame
   return jobj->child;
 }
 
-// One trophy list bar per row, spaced the way the panel's two row markers are
+// Rows are spaced using the panel's first two row markers
 void InitRows(JOBJ *panel) {
   Vec3 row_2;
   JOBJ_GetWorldPosition(GetJoint(panel, PANEL_ROW_1_JOINT), 0, &data->row_pos);
@@ -243,7 +243,7 @@ void InitRows(JOBJ *panel) {
     HideJoint(GetJoint(data->rows[i], ROW_SERIES_JOINT));
     SetRowPos(data->rows[i], i);
 
-    // Three texts per row like the trophy list: code, host and region, then mode, then count
+    // Same three texts per row as the trophy list. Code, host and region share the first
     data->name_text[i] = CreateRowText(i, ROW_CODE_X, ROW_NAME_SCALE_X, ROW_NAME_WIDTH);
     Text_AddSubtext(data->name_text[i], (ROW_NAME_X - ROW_CODE_X) / ROW_NAME_SCALE_X, 0, "");
     Text_AddSubtext(data->name_text[i], (ROW_REGION_X - ROW_CODE_X) / ROW_NAME_SCALE_X, 0, "");
@@ -254,19 +254,19 @@ void InitRows(JOBJ *panel) {
 
   data->empty_text = CreateRowText(0, ROW_CODE_X, ROW_NAME_SCALE_X, ROW_NAME_WIDTH);
 
-  // Each create setting's choices sit on the bar below its label
+  // Each create setting's choices go on the row below its label
   for (int i = 0; i < CREATE_SETTINGS; i++) {
     data->choice_text[i] = CreateSlotText(i * 2 + 1, settings[i].count, settings[i].scale_x);
   }
 
-  // The join screen's code and password bars, and the keypad below them
+  // Join screen code and password rows, with the keypad below them
   data->code_text = CreateSlotText(JOIN_CODE_ROW, CODE_DIGITS, ROW_COUNT_SCALE_X);
   data->password_text = CreateSlotText(JOIN_PASSWORD_ROW, PASSWORD_DIGITS, ROW_COUNT_SCALE_X);
   for (int i = 0; i < KEYPAD_ROWS; i++) {
     data->keypad_text[i] = CreateKeypadText(KEYPAD_FIRST_ROW + i);
   }
 
-  // A bar for the highlighted keypad key, under the cursor so it lights up like a row
+  // Bar under the highlighted key so it lights up like a selected row
   GOBJ *key_bar = LoadModel("ToyFigureListBase_Top_joint", 0, "ToyFigureListBase_Top_matanim_joint");
   data->key_bar = FreezeModel(key_bar, 0);
   HideJoint(GetJoint(data->key_bar, ROW_SERIES_JOINT));
@@ -277,7 +277,7 @@ void InitRows(JOBJ *panel) {
   GOBJ *slot_cursor = LoadModel("ToyFigureListCursor_Top_joint", 0, 0);
   data->slot_cursor = slot_cursor->hsd_object;
 
-  // The red line under the last row
+  // Red line under the last row
   GOBJ *list_end = LoadModel("ToyFigureListBaseend_Top_joint", 0, 0);
   data->list_end = list_end->hsd_object;
 }
@@ -289,7 +289,7 @@ Text *CreateRowText(int row, float x, float scale_x, float width) {
 
   Text *text = Text_CreateText(0, data->row_canvas);
 
-  // Text runs down the screen while the scene runs up, so the row's height is flipped
+  // Text y points down while the scene's y points up
   text->trans = (Vec3){row_x + x, -row_y - ROW_TEXT_Y, row_z};
   text->aspect = (Vec2){width, ROW_TEXT_HEIGHT};
   text->kerning = 1;
@@ -298,12 +298,11 @@ Text *CreateRowText(int row, float x, float scale_x, float width) {
   return text;
 }
 
-// A line for each slot on a row's bar, for the create form's choices and the join
-// screen's digits
+// Creates one subtext per slot on a row, used for create choices and join digits
 Text *CreateSlotText(int row, int count, float scale_x) {
   float slot = (FORM_RIGHT_X - FORM_LEFT_X) / count;
 
-  // Centered in equal slots across the bar. Line positions are in the text's own units
+  // Center each subtext in an equal slot across the row
   Text *text = CreateRowText(row, FORM_LEFT_X, scale_x, ROW_NAME_WIDTH);
   text->align = 1;
   Text_SetPosition(text, 0, slot / 2 / scale_x, 0);
@@ -313,7 +312,7 @@ Text *CreateSlotText(int row, int count, float scale_x) {
   return text;
 }
 
-// One row of keys, centered on the list area like a phone's keypad
+// Creates one row of the keypad, centered on the list area
 Text *CreateKeypadText(int row) {
   Text *text = CreateRowText(row, BAR_CENTER_X - KEYPAD_GAP_X, KEYPAD_SCALE_X, ROW_NAME_WIDTH);
   text->align = 1;
@@ -372,10 +371,10 @@ void UpdatePills() {
   }
 
   for (int i = 0; i < PILL_COUNT; i++) {
-    // The create and join screens only use the first pills
+    // The create and join screens use fewer pills
     if (i >= PillCount()) {
       JOBJ_SetFlagsAll(data->pills[i], JOBJ_HIDDEN);
-      Text_SetText(data->pill_text, data->pill_subtexts[i], "");
+      Text_SetText(data->pill_text, data->pill_subtext_ids[i], "");
       continue;
     }
     JOBJ_ClearFlagsAll(data->pills[i], JOBJ_HIDDEN);
@@ -383,14 +382,14 @@ void UpdatePills() {
     u8 is_on = IsPillOn(i);
     u8 is_hover = data->focus == Rooms_Focus_PILLS && data->pill_idx == i;
 
-    Text_SetText(data->pill_text, data->pill_subtexts[i], labels[i]);
+    Text_SetText(data->pill_text, data->pill_subtext_ids[i], labels[i]);
     const GXColor *col = is_on ? &pill_on : &pill_off;
     if (is_hover) {
       col = is_on ? &pill_hover_on : &pill_hover;
     }
-    Text_SetColor(data->pill_text, data->pill_subtexts[i], col);
+    Text_SetColor(data->pill_text, data->pill_subtext_ids[i], col);
 
-    // Frame 1 is the trophy screen's selected tab, frame 0 the others
+    // Frame 1 is the selected look, frame 0 is the normal look
     JOBJ_ReqAnim(data->pills[i], is_hover ? 1 : 0);
     JOBJ_Anim(data->pills[i]);
   }
@@ -405,7 +404,7 @@ void ClearRow(int row) {
   Text_SetText(data->size_text[row], 0, "");
 }
 
-// Empties the list area so the list, create form or join screen can draw into it
+// Clears the list area before the list, create form or join screen is drawn
 void ClearListArea() {
   for (int i = 0; i < LIST_ROWS; i++) {
     ClearRow(i);
@@ -433,7 +432,7 @@ void ClearListArea() {
   JOBJ_SetFlagsAll(data->slot_cursor, JOBJ_HIDDEN);
 }
 
-// Shows a model on a row, moved right by x and narrowed by scale_x
+// Shows a model on a row, offset by x and scaled by scale_x
 void PlaceModel(JOBJ *jobj, float row, float x, float scale_x) {
   JOBJ_ClearFlagsAll(jobj, JOBJ_HIDDEN);
   jobj->scale.X = scale_x;
@@ -481,8 +480,8 @@ void UpdateList() {
     JOBJ_ClearFlagsAll(data->rows[i], JOBJ_HIDDEN);
 
     Rooms_Room *room = &rooms[data->visible[i]];
-    Text_SetText(data->name_text[i], 0, room->code);
-    Text_SetText(data->name_text[i], 1, room->host);
+    Text_SetText(data->name_text[i], 0, "%s", room->code);
+    Text_SetText(data->name_text[i], 1, "%s", room->host);
     Text_SetText(data->name_text[i], 2, region_labels[room->region]);
     Text_SetText(data->mode_text[i], 0, mode_labels[room->mode]);
     // 0x815e is the slash in Melee's font
@@ -513,7 +512,7 @@ void UpdateList() {
   }
 }
 
-// The create form, in the list area: each setting's label, then its choices on a bar
+// Each create setting is a label row followed by a row of choices
 void UpdateCreate() {
   HideJoint(data->side_label);
 
@@ -540,9 +539,8 @@ void UpdateCreate() {
   }
 }
 
-// Shows count typed digits from entry[first] on a row's bar, with a dash for each one
-// still to type. The next digit's slot is highlighted, so its dash is dark like a
-// selected row's text
+// Shows count digits starting at entry[first], with a dash for each digit not typed yet.
+// The next digit's slot is highlighted
 void UpdateEntry(Text *text, int row, int first, int count) {
   for (int i = 0; i < count; i++) {
     int digit = first + i;
@@ -561,11 +559,11 @@ void UpdateEntry(Text *text, int row, int first, int count) {
   }
 }
 
-// The join screen: code and password bars, then the keypad
+// Code and password rows, followed by the keypad
 void UpdateJoin() {
   HideJoint(data->side_label);
 
-  // Each label sits on the row above its bar
+  // Labels go on the row above each entry
   Text_SetText(data->name_text[JOIN_CODE_ROW - 1], 0, "ROOM");
   Text_SetColor(data->name_text[JOIN_CODE_ROW - 1], 0, &label_color);
   Text_SetText(data->name_text[JOIN_PASSWORD_ROW - 1], 0, "PASSWORD");
@@ -575,7 +573,7 @@ void UpdateJoin() {
   UpdateEntry(data->code_text, JOIN_CODE_ROW, 0, CODE_DIGITS);
   UpdateEntry(data->password_text, JOIN_PASSWORD_ROW, CODE_DIGITS, PASSWORD_DIGITS);
 
-  // 1 to 9 in rows of three, then 0 under the 8
+  // 1 to 9 in rows of three, with 0 under the 8
   for (int i = 0; i < KEYPAD_ROWS - 1; i++) {
     for (int j = 0; j < KEYPAD_COLUMNS; j++) {
       Text_SetText(data->keypad_text[i], j, "%d", i * KEYPAD_COLUMNS + j + 1);
@@ -617,12 +615,25 @@ void OpenJoin() {
   data->key_col = 0;
 }
 
-// Back to the room list, with the cursor on the pill that opened the form
+// Returns to the room list, with the cursor on the pill that opened the form
 void CloseForm() {
   data->pill_idx = data->screen == Rooms_Screen_JOIN ? Rooms_MainPill_JOIN : Rooms_MainPill_CREATE;
   data->screen = Rooms_Screen_LIST;
   data->pill_row = Rooms_PillRow_MAIN;
   data->focus = Rooms_Focus_PILLS;
+}
+
+// Passes the create settings to the room scene and exits to it
+void EnterRoom() {
+  Rooms_SceneData *scene_data = data->scene_data;
+  scene_data->visibility = data->choices[Rooms_Setting_VISIBILITY];
+  scene_data->mode = data->choices[Rooms_Setting_MODE];
+  scene_data->capacity = size_values[data->choices[Rooms_Setting_SIZE]];
+  scene_data->stage_mode = data->choices[Rooms_Setting_STAGES];
+  scene_data->enter_room = true;
+
+  SFX_PlayCommon(CommonSound_ACCEPT);
+  data->should_exit = true;
 }
 
 void PlayAlert() {
@@ -635,8 +646,7 @@ void HandlePillPress() {
       SFX_PlayCommon(CommonSound_BACK);
       CloseForm();
     } else {
-      // Creating a room is not built yet
-      PlayAlert();
+      EnterRoom();
     }
     return;
   }
@@ -646,7 +656,7 @@ void HandlePillPress() {
       SFX_PlayCommon(CommonSound_BACK);
       CloseForm();
     } else if (data->entry_len != CODE_DIGITS && data->entry_len != ENTRY_DIGITS) {
-      // A full code, and either no password or a full one
+      // Require a full code, and either no password or a full one
       SFX_PlayCommon(CommonSound_ERROR);
     } else {
       // Joining a room is not built yet
@@ -694,8 +704,8 @@ void HandlePillPress() {
   }
 }
 
-// Moves around the keypad, types the key with A and deletes with B, or closes the
-// screen when there is nothing left to delete. Down from the 0 moves to the pills
+// A types the selected key and B deletes the last digit, closing the form if there are
+// none. Down from 0 moves to the pills
 u8 HandleKeypadInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs) {
   u8 on_zero = data->key_row == KEYPAD_ROWS - 1;
 
@@ -723,7 +733,7 @@ u8 HandleKeypadInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs) {
     data->entry[data->entry_len++] = on_zero ? 0 : data->key_row * KEYPAD_COLUMNS + data->key_col + 1;
     SFX_PlayCommon(CommonSound_ACCEPT);
 
-    // With every digit in, go straight to Join
+    // Move to the Join pill once every digit is typed
     if (data->entry_len == ENTRY_DIGITS) {
       data->focus = Rooms_Focus_PILLS;
       data->pill_idx = Rooms_JoinPill_JOIN;
@@ -745,8 +755,8 @@ u8 HandleKeypadInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs) {
   return true;
 }
 
-// Up and down pick a setting, left and right change it, and down from the last one
-// moves to the Create and Cancel pills. B closes the form
+// Up and down select a setting and left and right change it. Down from the last setting
+// moves to the pills and B closes the form
 u8 HandleCreateInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs) {
   int count = settings[data->setting_idx].count;
   int *choice = &data->choices[data->setting_idx];
@@ -783,7 +793,7 @@ void CObjThink(GOBJ *gobj) {
     return;
   }
 
-  // The trophy screen's navy
+  // Same navy as the trophy screen
   CObj_SetEraseColor(0, 0, 25, 255);
   CObj_EraseScreen(cobj, 1, 0, 1);
   CObj_RenderGXLinks(gobj, 7);
@@ -855,7 +865,7 @@ void InputsThink(GOBJ *gobj) {
       changed = true;
     } else if (downInputs & HSD_BUTTON_B) {
       if (data->pill_row == Rooms_PillRow_JOIN && data->entry_len > 0) {
-        // Deletes the last digit and goes back to the keypad to fix it
+        // Delete the last digit and go back to the keypad
         data->entry_len--;
         data->focus = Rooms_Focus_LIST;
       } else if (data->pill_row == Rooms_PillRow_CREATE || data->pill_row == Rooms_PillRow_JOIN) {

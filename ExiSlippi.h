@@ -5,6 +5,7 @@
 
 typedef enum ExiSlippi_Command {
   ExiSlippi_Command_SET_MATCH_SELECTIONS = 0xB5,
+  ExiSlippi_Command_GET_ONLINE_STATUS = 0xB9,
   ExiSlippi_Command_CLEANUP_CONNECTION = 0xBA,
   ExiSlippi_Command_OVERWRITE_SELECTIONS = 0xBF,
   ExiSlippi_Command_GP_COMPLETE_STEP = 0xC0,
@@ -115,6 +116,16 @@ typedef struct ExiSlippi_MatchState_Response {
   u8 game_info_block[0x138];
   char matchmake_id[51];
 } ExiSlippi_MatchState_Response;
+
+typedef struct ExiSlippi_GetOnlineStatus_Query {
+  u8 command;
+} ExiSlippi_GetOnlineStatus_Query;
+
+typedef struct ExiSlippi_GetOnlineStatus_Response {
+  u8 app_state;
+  char display_name[31];
+  char connect_code[10];
+} ExiSlippi_GetOnlineStatus_Response;
 
 typedef struct ExiSlippi_CleanupConnection_Query {
   u8 command;

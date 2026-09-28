@@ -41,4 +41,14 @@ mono $COMPILER_PATH -ff \
 -o "$OUTPUT_PATH/Rooms.dat" \
 -ow -c
 
+echo "Compiling Room Scene..."
+mono $COMPILER_PATH -ff \
+-i "Scenes/Rooms/Room.c" "Components/CharStageBoxSelector.c" "Components/CharStageIcon.c" "Components/StockIcon.c" "Components/CharPickerDialog.c" \
+-s mnFunction \
+-t "$TK_PATH/mnFunction.txt" \
+-l "./melee.link" \
+-b $BUILD_PATH \
+-o "$OUTPUT_PATH/Room.dat" \
+-ow -c
+
 echo "Finished Building at: $(date)"
