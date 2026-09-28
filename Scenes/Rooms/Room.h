@@ -38,18 +38,14 @@
 #define LIST_LINE_GAP 250
 #define PROMPT_GAP_X 1800
 
-#define ROOM_MAX_MEMBERS 32
-#define STAGE_COUNT 6
-
-#define SET_DELAY_FRAMES 120
-#define CROWN_DELAY_FRAMES 240
-#define TURN_DELAY_FRAMES 60  // Used by test players
 #define HOLD_FRAMES 60
-
-#define TURN_SECONDS 30
-#define GRACE_SECONDS 3
 #define WARN_SECONDS 10
 #define PANIC_SECONDS 3
+
+// Slippi's matchmaking can accept a search and never answer it, so a search that takes
+// this long is given up on and tried again
+#define CONNECT_TIMEOUT_FRAMES (60 * 30)
+#define CONNECT_RETRY_FRAMES (60 * 3)
 
 typedef enum Room_Side {
   Room_Side_NONE = -1,
@@ -57,6 +53,7 @@ typedef enum Room_Side {
   Room_Side_CHALLENGER,
 } Room_Side;
 
+// Same order as Dolphin's SlippiRoom::Phase
 typedef enum Room_Phase {
   Room_Phase_WAITING,
   Room_Phase_STRIKING,
@@ -65,63 +62,50 @@ typedef enum Room_Phase {
   Room_Phase_PLAYING,
 } Room_Phase;
 
-typedef struct Room_Member {
-  char name[31];
-  char connect_code[10];
-  u8 char_id;
-  u8 char_color;
-  u8 crowns;
-} Room_Member;
-
-// Room state shared with every member. The host's copy is the source of truth
-typedef struct Room_State {
-  Room_Member members[ROOM_MAX_MEMBERS];
-  u8 member_count;
-  u8 queue[ROOM_MAX_MEMBERS];
-  u8 queue_count;
-  s8 sides[2];  // Member index on each side, -1 if empty
-  u8 streak;
-  u32 beaten;  // Bit per member the current winner has beaten
-  s8 crowned;  // Member who just earned a crown, -1 if none
-  Room_Phase phase;
-  u8 struck[STAGE_COUNT];
-  CSIcon_Material stage;
-  u8 has_picked[2];
-  u8 play_char[2];  // Character each side plays as, with random resolved
-  u8 play_color[2];
-} Room_State;
+// Getting the local player into their match, the same way the CSS does for direct
+typedef enum Room_Handoff {
+  Room_Handoff_NONE,
+  Room_Handoff_SEARCHING,
+  Room_Handoff_CONNECTED,
+  Room_Handoff_FAILED,
+} Room_Handoff;
 
 typedef struct Room_Data {
   Rooms_SceneData *scene_data;
-  ExiSlippi_GetOnlineStatus_Response *online_status;
-  Room_State state;
+  ExiSlippi_GetRoomState_Query *state_query;
+  ExiSlippi_GetRoomState_Response *state;  // The room as Dolphin runs it
+  ExiSlippi_GetRoomState_Response *prev_state;
+  ExiSlippi_RoomAction_Query *action_query;
+  ExiSlippi_MatchState_Response *match_state;
   Text *text;
   Text *left_text;
   Text *right_text;
   Text *list_text;
   int name_subtext_ids[2];
   int code_subtext_ids[2];
+  int password_subtext_id;
+  int code_subtext_id;
+  int mode_subtext_id;
+  int stage_mode_subtext_id;
   int timer_subtext_id;
   int streak_subtext_id;
   int vs_subtext_id;
   int status_subtext_id;
   int count_subtext_id;
   int prompt_subtext_ids[3];
-  int timer_frames;
   int hold_idx;  // Prompt being held, -1 if none
   int hold_frames;
   CSBoxSelector *char_selectors[2];
   CSBoxSelector *stage_selector;
-  CSBoxSelector *stage_strike_selectors[STAGE_COUNT];
+  CSBoxSelector *stage_strike_selectors[ROOM_STAGE_COUNT];
   CharPickerDialog *char_picker_dialog;
   int selector_idx;
   u8 prev_picker_char;
-  u16 code;
-  u16 password;
+  Room_Handoff handoff;
+  int handoff_frames;
   u8 should_exit;
 } Room_Data;
 
-void LoadOnlineStatus();
 JOBJ *LoadPanels();
 JOBJ *GetJoint(JOBJ *root, int index);
 void HideJoint(JOBJ *jobj);
@@ -132,28 +116,26 @@ void InitHeader();
 void InitStage();
 void InitList();
 void InitPrompts();
-int AddMember(char *name, char *connect_code);
+void FetchState();
+void SendAction(u8 action, u8 value0, u8 value1);
+void OnStateChange();
 int QueuePos(int member);
 u8 IsOnSide(int member);
-void JoinQueue(int member);
-void LeaveQueue(int member);
-void FillSides();
-void StartSet();
-void FinishSet(Room_Side winner);
-u8 HasBeatenEveryone();
-void GetDisplayName(char *out, int member);
+Room_Side LocalSide();
 Room_Side TurnSide();
-void Strike(int idx);
-void Choose(int idx);
-void Pick(Room_Side side, u8 char_id, u8 char_color);
-void SetColor(int member, u8 char_color);
-void StartMatch();
-u8 UpdateTimer();
-void TimeOut(Room_Side side);
-void OnTurnChange();
-void OnQueueChange();
+u8 IsLocalTurn();
+void GetDisplayName(char *out, int member);
+u8 IsInRoom();
+void UpdateHeader();
+void UpdateJoining();
 void UpdateStage();
+void UpdatePrompts();
 void UpdateList();
+void UpdateCharPicker();
+void HandleMatchHandoff();
+void FindOpponent();
+void SetMatchSelections();
+void CleanupConnection();
 u8 GetVanilaMaxColors(u8 charId);
 u8 GetNextColor(u8 char_id, u8 color_id, int incr);
 void OnCharSelectionComplete(CharPickerDialog *cpd, u8 is_selection);
@@ -161,6 +143,7 @@ u8 CanChangeColor();
 void HandleColorInputs(u64 downInputs);
 void HandleHoldInputs(u64 heldInputs);
 void HandleStageInputs(u64 downInputs, u64 scrollInputs);
+void LeaveRoom();
 void CObjThink(GOBJ *gobj);
 void InputsThink(GOBJ *gobj);
 

@@ -1,6 +1,7 @@
 #ifndef SLIPPI_ROOMS_H
 #define SLIPPI_ROOMS_H
 
+#include "../../ExiSlippi.h"
 #include "../../m-ex/MexTK/mex.h"
 #include "SceneData.h"
 
@@ -75,6 +76,12 @@
 // Scale of the cursor that marks the next digit's slot
 #define SLOT_SCALE 0.19
 
+// How often the public room list is refreshed while it's shown
+#define LIST_REFRESH_FRAMES (60 * 5)
+
+// The rooms directory doesn't store a room's region yet
+#define REGION_UNKNOWN 0xFF
+
 typedef enum Rooms_Screen {
   Rooms_Screen_LIST,
   Rooms_Screen_CREATE,
@@ -128,16 +135,20 @@ typedef struct Rooms_SettingInfo {
 } Rooms_SettingInfo;
 
 typedef struct Rooms_Room {
-  char *code;
-  char *host;
+  char code[5];
+  char host[31];
   u8 mode;
   u8 region;
   u8 players;
-  u8 capacity;
+  u8 capacity;  // 0 is no limit
 } Rooms_Room;
 
 typedef struct Rooms_Data {
   Rooms_SceneData *scene_data;
+  ExiSlippi_GetRoomList_Query *list_query;
+  ExiSlippi_GetRoomList_Response *list;
+  u8 list_status;
+  int list_frames;
   Text *pill_text;
   int pill_subtext_ids[PILL_COUNT];
   JOBJ *pills[PILL_COUNT];
@@ -205,6 +216,9 @@ void CloseForm();
 u8 HandleCreateInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs);
 u8 HandleKeypadInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs);
 void EnterRoom();
+void JoinRoom(char *code, char *password);
+void FetchRoomList();
+void PollRoomList();
 void PlayAlert();
 void HandlePillPress();
 void CObjThink(GOBJ *gobj);

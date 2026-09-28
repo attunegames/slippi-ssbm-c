@@ -6,7 +6,7 @@ static HSD_Archive *trophy_archive;
 static HSD_Archive *gui_archive;
 static Rooms_Data *data;
 
-// Public rooms. Empty until the list is fetched from the server
+// Public rooms, fetched from the rooms directory
 static Rooms_Room rooms[LIST_ROWS];
 static int room_count = 0;
 
@@ -51,6 +51,10 @@ void minor_load(Rooms_SceneData *minor_data) {
   data = calloc(sizeof(Rooms_Data));
   data->scene_data = minor_data;
   minor_data->enter_room = false;
+
+  data->list_query = calloc(sizeof(ExiSlippi_GetRoomList_Query));
+  data->list = calloc(sizeof(ExiSlippi_GetRoomList_Response));
+  FetchRoomList();
 
   // Set up input handler. Initialize at top to make sure it runs before anything else
   GOBJ *input_handler_gobj = GObj_Create(4, 0, 128);
@@ -141,7 +145,10 @@ void minor_load(Rooms_SceneData *minor_data) {
 void minor_think() {
   if (data->should_exit) {
     Scene_ExitMinor();
+    return;
   }
+
+  PollRoomList();
 }
 
 void minor_exit(Rooms_SceneData *minor_data) {
@@ -459,7 +466,7 @@ void UpdateList() {
     if (data->mode_filter && !((data->mode_filter >> room->mode) & 1)) {
       continue;
     }
-    if (data->region_filter && !((data->region_filter >> room->region) & 1)) {
+    if (data->region_filter && room->region != REGION_UNKNOWN && !((data->region_filter >> room->region) & 1)) {
       continue;
     }
     data->visible[data->visible_count++] = i;
@@ -482,10 +489,14 @@ void UpdateList() {
     Rooms_Room *room = &rooms[data->visible[i]];
     Text_SetText(data->name_text[i], 0, "%s", room->code);
     Text_SetText(data->name_text[i], 1, "%s", room->host);
-    Text_SetText(data->name_text[i], 2, region_labels[room->region]);
+    Text_SetText(data->name_text[i], 2, room->region == REGION_UNKNOWN ? "" : region_labels[room->region]);
     Text_SetText(data->mode_text[i], 0, mode_labels[room->mode]);
     // 0x815e is the slash in Melee's font
-    Text_SetText(data->size_text[i], 0, "%d\x81\x5e%d", room->players, room->capacity);
+    if (room->capacity != 0) {
+      Text_SetText(data->size_text[i], 0, "%d\x81\x5e%d", room->players, room->capacity);
+    } else {
+      Text_SetText(data->size_text[i], 0, "%d", room->players);
+    }
     data->size_text[i]->scale.X = room->capacity >= 10 ? ROW_COUNT_LONG_SCALE_X : ROW_COUNT_SCALE_X;
 
     const GXColor *col = &row_color;
@@ -501,6 +512,11 @@ void UpdateList() {
 
   if (data->visible_count == 0) {
     char *msg = data->mode_filter || data->region_filter ? "No rooms match these filters" : "No public rooms right now";
+    if (data->list_status == ExiSlippi_RoomListStatus_FETCHING && room_count == 0) {
+      msg = "Looking for rooms";
+    } else if (data->list_status == ExiSlippi_RoomListStatus_FAILED) {
+      msg = "Could not reach the room list";
+    }
     Text_SetText(data->empty_text, 0, msg);
   } else {
     JOBJ_ClearFlagsAll(data->list_end, JOBJ_HIDDEN);
@@ -623,17 +639,90 @@ void CloseForm() {
   data->focus = Rooms_Focus_PILLS;
 }
 
-// Passes the create settings to the room scene and exits to it
+// Creates the room with the create settings and exits to the room scene
 void EnterRoom() {
   Rooms_SceneData *scene_data = data->scene_data;
-  scene_data->visibility = data->choices[Rooms_Setting_VISIBILITY];
-  scene_data->mode = data->choices[Rooms_Setting_MODE];
-  scene_data->capacity = size_values[data->choices[Rooms_Setting_SIZE]];
-  scene_data->stage_mode = data->choices[Rooms_Setting_STAGES];
+
+  ExiSlippi_CreateRoom_Query *q = calloc(sizeof(ExiSlippi_CreateRoom_Query));
+  q->command = ExiSlippi_Command_CREATE_ROOM;
+  q->visibility = data->choices[Rooms_Setting_VISIBILITY];
+  q->mode = data->choices[Rooms_Setting_MODE];
+  q->capacity = size_values[data->choices[Rooms_Setting_SIZE]];
+  q->stage_mode = data->choices[Rooms_Setting_STAGES];
+  q->last_char = scene_data->last_char;
+  q->last_color = scene_data->last_color;
+  ExiSlippi_Transfer(q, sizeof(ExiSlippi_CreateRoom_Query), ExiSlippi_TransferMode_WRITE);
+
   scene_data->enter_room = true;
 
   SFX_PlayCommon(CommonSound_ACCEPT);
   data->should_exit = true;
+}
+
+// Joins a room by its code, then exits to the room scene, which shows the join happening
+void JoinRoom(char *code, char *password) {
+  Rooms_SceneData *scene_data = data->scene_data;
+
+  ExiSlippi_JoinRoom_Query *q = calloc(sizeof(ExiSlippi_JoinRoom_Query));
+  q->command = ExiSlippi_Command_JOIN_ROOM;
+  memcpy(q->code, code, CODE_DIGITS);
+  memcpy(q->password, password, strlen(password));
+  q->last_char = scene_data->last_char;
+  q->last_color = scene_data->last_color;
+  ExiSlippi_Transfer(q, sizeof(ExiSlippi_JoinRoom_Query), ExiSlippi_TransferMode_WRITE);
+
+  scene_data->enter_room = true;
+
+  SFX_PlayCommon(CommonSound_ACCEPT);
+  data->should_exit = true;
+}
+
+void FetchRoomList() {
+  ExiSlippi_FetchRoomList_Query *q = calloc(sizeof(ExiSlippi_FetchRoomList_Query));
+  q->command = ExiSlippi_Command_FETCH_ROOM_LIST;
+  ExiSlippi_Transfer(q, sizeof(ExiSlippi_FetchRoomList_Query), ExiSlippi_TransferMode_WRITE);
+
+  data->list_status = ExiSlippi_RoomListStatus_FETCHING;
+  data->list_frames = 0;
+}
+
+// Reads the public rooms once they're fetched, and fetches them again every few seconds
+void PollRoomList() {
+  if (data->screen != Rooms_Screen_LIST) {
+    return;
+  }
+
+  if (++data->list_frames >= LIST_REFRESH_FRAMES) {
+    FetchRoomList();
+  }
+
+  if (data->list_status != ExiSlippi_RoomListStatus_FETCHING) {
+    return;
+  }
+
+  data->list_query->command = ExiSlippi_Command_GET_ROOM_LIST;
+  ExiSlippi_Transfer(data->list_query, sizeof(ExiSlippi_GetRoomList_Query), ExiSlippi_TransferMode_WRITE);
+  ExiSlippi_Transfer(data->list, sizeof(ExiSlippi_GetRoomList_Response), ExiSlippi_TransferMode_READ);
+
+  if (data->list->status == ExiSlippi_RoomListStatus_FETCHING) {
+    return;
+  }
+
+  data->list_status = data->list->status;
+  room_count = data->list->count < LIST_ROWS ? data->list->count : LIST_ROWS;
+  for (int i = 0; i < room_count; i++) {
+    ExiSlippi_RoomListing *l = &data->list->rooms[i];
+    Rooms_Room *room = &rooms[i];
+    memcpy(room->code, l->code, sizeof(room->code));
+    memcpy(room->host, l->host_name, sizeof(room->host));
+    room->mode = l->mode;
+    room->region = REGION_UNKNOWN;
+    room->players = l->member_count;
+    room->capacity = l->capacity;
+  }
+
+  UpdateList();
+  UpdatePills();
 }
 
 void PlayAlert() {
@@ -659,8 +748,16 @@ void HandlePillPress() {
       // Require a full code, and either no password or a full one
       SFX_PlayCommon(CommonSound_ERROR);
     } else {
-      // Joining a room is not built yet
-      PlayAlert();
+      char code[CODE_DIGITS + 1] = {0};
+      char password[PASSWORD_DIGITS + 1] = {0};
+      for (int i = 0; i < data->entry_len; i++) {
+        if (i < CODE_DIGITS) {
+          code[i] = '0' + data->entry[i];
+        } else {
+          password[i - CODE_DIGITS] = '0' + data->entry[i];
+        }
+      }
+      JoinRoom(code, password);
     }
     return;
   }
@@ -841,8 +938,7 @@ void InputsThink(GOBJ *gobj) {
       SFX_PlayCommon(CommonSound_NEXT);
       changed = true;
     } else if (downInputs & HSD_BUTTON_A) {
-      // Joining a listed room is not built yet
-      PlayAlert();
+      JoinRoom(rooms[data->visible[data->row_idx]].code, "");
     } else if (downInputs & HSD_BUTTON_B) {
       SFX_PlayCommon(CommonSound_BACK);
       data->should_exit = true;

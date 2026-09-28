@@ -11,8 +11,8 @@ static Room_Data *data;
 static char *mode_labels[] = {"Singles", "Doubles", "Ironman", "Crews", "Tourney"};
 static char *stage_labels[] = {"Random stages", "Stage draft"};
 
-// Starter stages, used for both the draft and random stages
-static CSIcon_Material stages[STAGE_COUNT] = {
+// Starter stages, used for both the draft and random stages. Same order as Dolphin's room
+static CSIcon_Material stages[ROOM_STAGE_COUNT] = {
     CSIcon_Material_Fountain,
     CSIcon_Material_Dreamland,
     CSIcon_Material_Yoshis,
@@ -20,13 +20,26 @@ static CSIcon_Material stages[STAGE_COUNT] = {
     CSIcon_Material_Battlefield,
     CSIcon_Material_Pokemon,
 };
-static char *stage_names[STAGE_COUNT] = {
+static char *stage_names[ROOM_STAGE_COUNT] = {
     "Fountain of Dreams",
     "Dreamland",
     "Yoshi's Story",
     "Final Destination",
     "Battlefield",
     "Pokemon Stadium",
+};
+
+// Indexed by ExiSlippi_RoomError
+static char *join_errors[] = {
+    "",
+    "Rooms are unavailable right now",
+    "No room with that code",
+    "Wrong password",
+    "That room is full",
+    "Too many tries, wait a few minutes",
+    "Could not connect to the room",
+    "Lost connection to the room",
+    "The room did not let you in",
 };
 
 const GXColor text_color = {255, 255, 255, 255};
@@ -37,11 +50,20 @@ const GXColor panic_color = {255, 50, 50, 255};
 void minor_load(Rooms_SceneData *minor_data) {
   data = calloc(sizeof(Room_Data));
   data->scene_data = minor_data;
-  LoadOnlineStatus();
+  data->hold_idx = -1;
 
-  // Generate the room code and password
-  data->code = HSD_Randi(10000);
-  data->password = HSD_Randi(10000);
+  // Allocate some memory used throughout
+  data->state_query = calloc(sizeof(ExiSlippi_GetRoomState_Query));
+  data->state = calloc(sizeof(ExiSlippi_GetRoomState_Response));
+  data->prev_state = calloc(sizeof(ExiSlippi_GetRoomState_Response));
+  data->action_query = calloc(sizeof(ExiSlippi_RoomAction_Query));
+  data->match_state = ExiSlippi_LoadMatchState(0);
+
+  // Coming back from the room's match
+  if (minor_data->start_match) {
+    minor_data->start_match = false;
+    SendAction(ExiSlippi_RoomAction_MATCH_ENDED, 0, 0);
+  }
 
   // Set up input handler. Initialize at top to make sure it runs before anything else
   GOBJ *input_handler_gobj = GObj_Create(4, 0, 128);
@@ -105,91 +127,35 @@ void minor_load(Rooms_SceneData *minor_data) {
   data->char_picker_dialog = CharPickerDialog_Init(gui_assets, OnCharSelectionComplete, GetNextColor);
   CharPickerDialog_SetPos(data->char_picker_dialog, (Vec3){0, -9, 0});
 
-  // Add the local player as the first member, starting on their last pick
-  Room_State *state = &data->state;
-  state->sides[Room_Side_WINNER] = -1;
-  state->sides[Room_Side_CHALLENGER] = -1;
-  state->crowned = -1;
-  AddMember(data->online_status->display_name, data->online_status->connect_code);
-  state->members[0].char_id = minor_data->last_char;
-  state->members[0].char_color = minor_data->last_color;
-  data->hold_idx = -1;
-  OnTurnChange();
+  FetchState();
+  OnStateChange();
 }
 
 void minor_think() {
-  Room_State *state = &data->state;
-  data->timer_frames++;
-
   if (data->should_exit) {
     Scene_ExitMinor();
     return;
   }
 
-  u8 is_time_elapsed = UpdateTimer();
+  FetchState();
 
-  // Start the set once both sides are filled and the delay has passed
-  if (state->phase == Room_Phase_WAITING) {
-    int delay = state->crowned >= 0 ? CROWN_DELAY_FRAMES : SET_DELAY_FRAMES;
-    if (state->sides[Room_Side_CHALLENGER] >= 0 && data->timer_frames >= delay) {
-      StartSet();
-    }
+  // The room is gone, such as after leaving it
+  if (!data->state->is_active) {
+    data->should_exit = true;
     return;
   }
 
-  Room_Side side = TurnSide();
-  if (side == Room_Side_NONE) {
-    return;
+  if (memcmp(data->state, data->prev_state, sizeof(ExiSlippi_GetRoomState_Response)) != 0) {
+    OnStateChange();
   }
 
-  if (is_time_elapsed) {
-    TimeOut(side);
-    return;
+  if (IsInRoom()) {
+    UpdateCharPicker();
+    HandleMatchHandoff();
   }
-
-  // Keep the character picker open during the local player's pick
-  int member = state->sides[side];
-  if (member == 0) {
-    if (state->phase == Room_Phase_PICKING && !data->char_picker_dialog->state.is_open) {
-      Room_Member *m = &state->members[member];
-      CharPickerDialog_OpenDialog(data->char_picker_dialog, m->char_id, m->char_color);
-    }
-    return;
-  }
-
-#ifdef LOCAL_TESTING
-  // Take the turn for a test player after a short delay
-  if (data->timer_frames < TURN_DELAY_FRAMES) {
-    return;
-  }
-
-  if (state->phase == Room_Phase_STRIKING || state->phase == Room_Phase_CHOOSING) {
-    int idx = HSD_Randi(STAGE_COUNT);
-    while (state->struck[idx]) {
-      idx = (idx + 1) % STAGE_COUNT;
-    }
-    if (state->phase == Room_Phase_STRIKING) {
-      Strike(idx);
-    } else {
-      Choose(idx);
-    }
-  } else if (state->phase == Room_Phase_PICKING) {
-    Pick(side, HSD_Randi(CKIND_RANDOM + 1), 0);  // Includes random
-  }
-#endif
 }
 
 void minor_exit(Rooms_SceneData *minor_data) {
-}
-
-// Fetch the local player's display name and connect code
-void LoadOnlineStatus() {
-  data->online_status = calloc(sizeof(ExiSlippi_GetOnlineStatus_Response));
-
-  ExiSlippi_GetOnlineStatus_Query *q = calloc(sizeof(ExiSlippi_GetOnlineStatus_Query));
-  q->command = ExiSlippi_Command_GET_ONLINE_STATUS;
-  ExiSlippi_Transfer(q, sizeof(ExiSlippi_GetOnlineStatus_Query), ExiSlippi_TransferMode_WRITE);
-  ExiSlippi_Transfer(data->online_status, sizeof(ExiSlippi_GetOnlineStatus_Response), ExiSlippi_TransferMode_READ);
 }
 
 // Loads a copy of the panels, frozen fully open
@@ -254,23 +220,13 @@ int AddSubtext(Text *text, float x, float y, float scale, char *str) {
 
 // Room code and password on the left, room settings on the right
 void InitHeader() {
-  Rooms_SceneData *scene_data = data->scene_data;
+  data->code_subtext_id = AddSubtext(data->left_text, -2800, -1940, 5, "");
+  data->password_subtext_id = AddSubtext(data->left_text, -2800, -1740, 3, "");
+  Text_SetColor(data->left_text, data->password_subtext_id, &dim_color);
 
-  char code[16];
-  sprintf(code, "Room %04d", data->code);
-  AddSubtext(data->left_text, -2800, -1940, 5, code);
-
-  // Only private rooms have a password
-  if (scene_data->visibility != 0) {
-    char password[16];
-    sprintf(password, "Password %04d", data->password);
-    int id = AddSubtext(data->left_text, -2800, -1740, 3, password);
-    Text_SetColor(data->left_text, id, &dim_color);
-  }
-
-  AddSubtext(data->right_text, 2800, -1940, 5, mode_labels[scene_data->mode]);
-  int id = AddSubtext(data->right_text, 2800, -1740, 3, stage_labels[scene_data->stage_mode]);
-  Text_SetColor(data->right_text, id, &dim_color);
+  data->mode_subtext_id = AddSubtext(data->right_text, 2800, -1940, 5, "");
+  data->stage_mode_subtext_id = AddSubtext(data->right_text, 2800, -1740, 3, "");
+  Text_SetColor(data->right_text, data->stage_mode_subtext_id, &dim_color);
 
   // Init timer subtext
   data->timer_subtext_id = AddSubtext(data->text, 0, -1880, 6, "");
@@ -297,8 +253,8 @@ void InitStage() {
   data->stage_selector = CSBoxSelector_Init(gui_assets);
   CSBoxSelector_SetPos(data->stage_selector, (Vec3){STAGE_CENTER_X, STAGE_BOX_Y, 0});
 
-  float x = STAGE_CENTER_X - STRIKE_BOX_GAP * (STAGE_COUNT - 1) / 2;
-  for (int i = 0; i < STAGE_COUNT; i++) {
+  float x = STAGE_CENTER_X - STRIKE_BOX_GAP * (ROOM_STAGE_COUNT - 1) / 2;
+  for (int i = 0; i < ROOM_STAGE_COUNT; i++) {
     CSBoxSelector *bs = CSBoxSelector_Init(gui_assets);
     CSIcon_SetMaterial(bs->icon, stages[i]);
     CSBoxSelector_SetPos(bs, (Vec3){x + STRIKE_BOX_GAP * i, STAGE_BOX_Y, 0});
@@ -326,23 +282,55 @@ void InitPrompts() {
   }
 }
 
-int AddMember(char *name, char *connect_code) {
-  Room_State *state = &data->state;
-  if (state->member_count >= ROOM_MAX_MEMBERS) {
-    return -1;
+// Fetch the room from Dolphin, keeping the last one to see what changed
+void FetchState() {
+  memcpy(data->prev_state, data->state, sizeof(ExiSlippi_GetRoomState_Response));
+
+  data->state_query->command = ExiSlippi_Command_GET_ROOM_STATE;
+  ExiSlippi_Transfer(data->state_query, sizeof(ExiSlippi_GetRoomState_Query), ExiSlippi_TransferMode_WRITE);
+  ExiSlippi_Transfer(data->state, sizeof(ExiSlippi_GetRoomState_Response), ExiSlippi_TransferMode_READ);
+}
+
+void SendAction(u8 action, u8 value0, u8 value1) {
+  ExiSlippi_RoomAction_Query *q = data->action_query;
+  q->command = ExiSlippi_Command_ROOM_ACTION;
+  q->action = action;
+  q->value[0] = value0;
+  q->value[1] = value1;
+  ExiSlippi_Transfer(q, sizeof(ExiSlippi_RoomAction_Query), ExiSlippi_TransferMode_WRITE);
+}
+
+void OnStateChange() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  ExiSlippi_GetRoomState_Response *prev = data->prev_state;
+
+  UpdateHeader();
+  if (!IsInRoom()) {
+    UpdateJoining();
+    return;
   }
 
-  Room_Member *m = &state->members[state->member_count];
-  memcpy(m->name, name, sizeof(m->name));
-  memcpy(m->connect_code, connect_code, sizeof(m->connect_code));
-  m->char_id = CKIND_RANDOM;
-  m->char_color = 0;
-  return state->member_count++;
+  // Start the stage cursor on the first stage that isn't struck each turn
+  if (state->phase != prev->phase) {
+    data->selector_idx = 0;
+    while (data->selector_idx < ROOM_STAGE_COUNT - 1 && state->struck[data->selector_idx]) {
+      data->selector_idx++;
+    }
+  }
+
+  // Warn the local player when their time is almost up
+  if (IsLocalTurn() && state->turn_seconds == PANIC_SECONDS && prev->turn_seconds != PANIC_SECONDS) {
+    SFX_PlayCommon(CommonSound_OFFSCREEN);
+  }
+
+  UpdateStage();
+  UpdatePrompts();
+  UpdateList();
 }
 
 // Returns the member's position in the queue, -1 if not queued
 int QueuePos(int member) {
-  Room_State *state = &data->state;
+  ExiSlippi_GetRoomState_Response *state = data->state;
   for (int i = 0; i < state->queue_count; i++) {
     if (state->queue[i] == member) {
       return i;
@@ -352,144 +340,22 @@ int QueuePos(int member) {
 }
 
 u8 IsOnSide(int member) {
-  return data->state.sides[Room_Side_WINNER] == member || data->state.sides[Room_Side_CHALLENGER] == member;
+  return data->state->sides[Room_Side_WINNER] == member || data->state->sides[Room_Side_CHALLENGER] == member;
 }
 
-void JoinQueue(int member) {
-  Room_State *state = &data->state;
-  if (QueuePos(member) >= 0 || IsOnSide(member)) {
-    return;
+Room_Side LocalSide() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  if (state->sides[Room_Side_WINNER] == state->local_member) {
+    return Room_Side_WINNER;
   }
-
-  state->queue[state->queue_count++] = member;
-  FillSides();
-}
-
-void LeaveQueue(int member) {
-  Room_State *state = &data->state;
-
-  int pos = QueuePos(member);
-  if (pos >= 0) {
-    state->queue_count--;
-    for (int i = pos; i < state->queue_count; i++) {
-      state->queue[i] = state->queue[i + 1];
-    }
+  if (state->sides[Room_Side_CHALLENGER] == state->local_member) {
+    return Room_Side_CHALLENGER;
   }
-
-  // Also give up the member's side if the set hasn't started yet
-  if (state->phase == Room_Phase_WAITING && IsOnSide(member)) {
-    if (state->sides[Room_Side_WINNER] == member) {
-      state->sides[Room_Side_WINNER] = state->sides[Room_Side_CHALLENGER];
-      state->has_picked[Room_Side_WINNER] = state->has_picked[Room_Side_CHALLENGER];
-      state->streak = 0;
-      state->beaten = 0;
-    }
-    state->sides[Room_Side_CHALLENGER] = -1;
-    FillSides();
-  }
-}
-
-// Moves the next players in the queue onto any empty side between sets
-void FillSides() {
-  Room_State *state = &data->state;
-  if (state->phase != Room_Phase_WAITING) {
-    return;
-  }
-
-  for (int side = 0; side < 2; side++) {
-    if (state->sides[side] >= 0 || state->queue_count == 0) {
-      continue;
-    }
-
-    state->sides[side] = state->queue[0];
-    state->has_picked[side] = false;
-    state->queue_count--;
-    for (int i = 0; i < state->queue_count; i++) {
-      state->queue[i] = state->queue[i + 1];
-    }
-  }
-}
-
-void StartSet() {
-  Room_State *state = &data->state;
-  memset(state->struck, 0, sizeof(state->struck));
-  memset(state->has_picked, 0, sizeof(state->has_picked));
-  state->crowned = -1;
-
-  if (data->scene_data->stage_mode != 0) {
-    state->phase = Room_Phase_STRIKING;
-  } else {
-    state->stage = stages[HSD_Randi(STAGE_COUNT)];
-    state->phase = Room_Phase_PICKING;
-  }
-
-  OnTurnChange();
-}
-
-// The winner stays on and the loser goes to the back of the queue
-void FinishSet(Room_Side winner) {
-  Room_State *state = &data->state;
-  int winning_member = state->sides[winner];
-  int losing_member = state->sides[!winner];
-
-  if (winner == Room_Side_WINNER) {
-    state->streak++;
-    state->beaten |= 1 << losing_member;
-  } else {
-    state->streak = 1;
-    state->beaten = 1 << losing_member;
-  }
-  state->sides[Room_Side_WINNER] = winning_member;
-  state->sides[Room_Side_CHALLENGER] = -1;
-  state->phase = Room_Phase_WAITING;
-
-  // Keep showing the winner's character from the last set
-  state->has_picked[Room_Side_WINNER] = true;
-
-  JoinQueue(losing_member);
-
-  // Beating everyone in the queue earns a crown and sends the winner to the back of it
-  if (HasBeatenEveryone()) {
-    state->members[winning_member].crowns++;
-    state->crowned = winning_member;
-    state->streak = 0;
-    state->beaten = 0;
-    state->sides[Room_Side_WINNER] = -1;
-    JoinQueue(winning_member);
-  }
-
-  OnTurnChange();
-}
-
-// Checks the queue and the next challenger, who may have already stepped up
-u8 HasBeatenEveryone() {
-  Room_State *state = &data->state;
-  int challenger = state->sides[Room_Side_CHALLENGER];
-  if (challenger >= 0 && !(state->beaten & 1 << challenger)) {
-    return false;
-  }
-
-  for (int i = 0; i < state->queue_count; i++) {
-    if (!(state->beaten & 1 << state->queue[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-// Name followed by the member's crown count. 0x817e is the multiplication sign in
-// Melee's font
-void GetDisplayName(char *out, int member) {
-  Room_Member *m = &data->state.members[member];
-  if (m->crowns == 0) {
-    sprintf(out, "%s", m->name);
-  } else {
-    sprintf(out, "%s  \x81\x7e%d", m->name, m->crowns);
-  }
+  return Room_Side_NONE;
 }
 
 Room_Side TurnSide() {
-  Room_State *state = &data->state;
+  ExiSlippi_GetRoomState_Response *state = data->state;
   if (state->phase == Room_Phase_STRIKING) {
     return Room_Side_WINNER;
   }
@@ -502,137 +368,87 @@ Room_Side TurnSide() {
   return Room_Side_NONE;
 }
 
-// In the draft the winner strikes a stage, then the challenger chooses from the rest
-void Strike(int idx) {
-  data->state.struck[idx] = true;
-  data->state.phase = Room_Phase_CHOOSING;
-  SFX_PlayCommon(CommonSound_NEXT);
-  OnTurnChange();
-}
-
-void Choose(int idx) {
-  data->state.stage = stages[idx];
-  data->state.phase = Room_Phase_PICKING;
-  SFX_PlayCommon(CommonSound_ACCEPT);
-  OnTurnChange();
-}
-
-void Pick(Room_Side side, u8 char_id, u8 char_color) {
-  Room_State *state = &data->state;
-  int member = state->sides[side];
-  state->members[member].char_id = char_id;
-  SetColor(member, char_color);
-  state->has_picked[side] = true;
-
-  if (state->has_picked[Room_Side_CHALLENGER]) {
-    StartMatch();
-  }
-
-  SFX_PlayCommon(CommonSound_ACCEPT);
-  OnTurnChange();
-}
-
-void SetColor(int member, u8 char_color) {
-  Room_Member *m = &data->state.members[member];
-  m->char_color = char_color;
-
-  // Remember the local player's pick for the next room
-  if (member == 0) {
-    data->scene_data->last_char = m->char_id;
-    data->scene_data->last_color = m->char_color;
-  }
-}
-
-// Random picks become a random character and color once the match starts
-void StartMatch() {
-  Room_State *state = &data->state;
-  for (int side = 0; side < 2; side++) {
-    Room_Member *m = &state->members[state->sides[side]];
-    state->play_char[side] = m->char_id;
-    state->play_color[side] = m->char_color;
-
-    if (m->char_id >= CKIND_RANDOM) {
-      state->play_char[side] = HSD_Randi(CKIND_RANDOM);
-      state->play_color[side] = HSD_Randi(GetVanilaMaxColors(state->play_char[side]));
-    }
-  }
-
-  state->phase = Room_Phase_PLAYING;
-}
-
-// Same as ranked's timer. Returns true once time has run out, after the grace period
-u8 UpdateTimer() {
+u8 IsLocalTurn() {
   Room_Side turn = TurnSide();
-  if (turn == Room_Side_NONE) {
-    Text_SetText(data->text, data->timer_subtext_id, "");
-    return false;
-  }
-
-  int seconds_remaining = TURN_SECONDS - data->timer_frames / 60;
-  if (seconds_remaining < 0) {
-    seconds_remaining = 0;
-  }
-  Text_SetText(data->text, data->timer_subtext_id, "%d:%02d", seconds_remaining / 60, seconds_remaining % 60);
-  Text_SetColor(data->text, data->timer_subtext_id, &text_color);
-
-  // Only warn the player whose turn it is
-  if (data->state.sides[turn] == 0) {
-    if (data->timer_frames == 60 * (TURN_SECONDS - PANIC_SECONDS)) {
-      SFX_PlayCommon(CommonSound_OFFSCREEN);
-    }
-
-    if (seconds_remaining <= PANIC_SECONDS) {
-      Text_SetColor(data->text, data->timer_subtext_id, &panic_color);
-    } else if (seconds_remaining <= WARN_SECONDS) {
-      Text_SetColor(data->text, data->timer_subtext_id, &warn_color);
-    }
-  }
-
-  return data->timer_frames > 60 * (TURN_SECONDS + GRACE_SECONDS);
+  return turn != Room_Side_NONE && turn == LocalSide();
 }
 
-// Completes the turn with the hovered stage or the member's last character
-void TimeOut(Room_Side side) {
-  Room_State *state = &data->state;
-  if (state->phase == Room_Phase_STRIKING) {
-    Strike(data->selector_idx);
-  } else if (state->phase == Room_Phase_CHOOSING) {
-    Choose(data->selector_idx);
-  } else if (state->phase == Room_Phase_PICKING) {
-    if (data->char_picker_dialog->state.is_open) {
-      CharPickerDialog_CloseDialog(data->char_picker_dialog);
-    }
-
-    Room_Member *m = &state->members[state->sides[side]];
-    Pick(side, m->char_id, m->char_color);
+// Name followed by the member's crown count. 0x817e is the multiplication sign in
+// Melee's font
+void GetDisplayName(char *out, int member) {
+  ExiSlippi_RoomMember *m = &data->state->members[member];
+  if (m->crowns == 0) {
+    sprintf(out, "%s", m->name);
+  } else {
+    sprintf(out, "%s  \x81\x7e%d", m->name, m->crowns);
   }
 }
 
-void OnTurnChange() {
-  data->timer_frames = 0;
-
-  // Start on the first stage that isn't struck
-  data->selector_idx = 0;
-  while (data->state.struck[data->selector_idx]) {
-    data->selector_idx++;
-  }
-
-  UpdateStage();
-  UpdateList();
+// Whether we're hosting the room or have joined it, rather than still joining
+u8 IsInRoom() {
+  u8 status = data->state->connection_status;
+  return status == ExiSlippi_RoomStatus_HOSTING || status == ExiSlippi_RoomStatus_JOINED;
 }
 
-// Only restart the timer between sets, so a queue change never resets a turn
-void OnQueueChange() {
-  if (data->state.phase == Room_Phase_WAITING) {
-    data->timer_frames = 0;
+// The code arrives once the room is registered, and stays empty if it couldn't be
+void UpdateHeader() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  Text_SetText(data->left_text, data->code_subtext_id, "Room %s", state->code[0] ? state->code : "----");
+
+  // Only private rooms have a password
+  if (state->password[0]) {
+    Text_SetText(data->left_text, data->password_subtext_id, "Password %s", state->password);
+  } else {
+    Text_SetText(data->left_text, data->password_subtext_id, "");
   }
 
-  UpdateStage();
-  UpdateList();
+  if (!IsInRoom()) {
+    Text_SetText(data->right_text, data->mode_subtext_id, "");
+    Text_SetText(data->right_text, data->stage_mode_subtext_id, "");
+    return;
+  }
+
+  Text_SetText(data->right_text, data->mode_subtext_id, mode_labels[state->mode]);
+  Text_SetText(data->right_text, data->stage_mode_subtext_id, stage_labels[state->stage_mode]);
+}
+
+// Shows the join happening, or why it didn't work
+void UpdateJoining() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  u8 is_failed = state->connection_status == ExiSlippi_RoomStatus_FAILED;
+
+  for (int i = 0; i < 2; i++) {
+    CSBoxSelector_SetVisibility(data->char_selectors[i], false);
+    Text_SetText(data->text, data->name_subtext_ids[i], "");
+    Text_SetText(data->text, data->code_subtext_ids[i], "");
+  }
+  CSBoxSelector_SetVisibility(data->stage_selector, false);
+  for (int i = 0; i < ROOM_STAGE_COUNT; i++) {
+    CSBoxSelector_SetVisibility(data->stage_strike_selectors[i], false);
+  }
+  Text_SetText(data->text, data->vs_subtext_id, "");
+  Text_SetText(data->text, data->streak_subtext_id, "");
+  Text_SetText(data->text, data->timer_subtext_id, "");
+
+  u8 error = state->connection_error < sizeof(join_errors) / sizeof(join_errors[0]) ? state->connection_error : 0;
+  if (is_failed) {
+    Text_SetText(data->text, data->status_subtext_id, "%s", join_errors[error]);
+  } else {
+    Text_SetText(data->text, data->status_subtext_id, "Joining room %s", state->code);
+  }
+
+  for (int i = 0; i < LIST_LINES; i++) {
+    Text_SetText(data->list_text, i, "");
+  }
+  Text_SetText(data->right_text, data->count_subtext_id, "");
+
+  Text_SetText(data->text, data->prompt_subtext_ids[0], "");
+  Text_SetText(data->text, data->prompt_subtext_ids[1], is_failed ? "B  Back" : "Hold B  Leave");
+  Text_SetText(data->text, data->prompt_subtext_ids[2], "");
 }
 
 void UpdateStage() {
-  Room_State *state = &data->state;
+  ExiSlippi_GetRoomState_Response *state = data->state;
   Room_Side turn = TurnSide();
   u8 is_drafting = state->phase == Room_Phase_STRIKING || state->phase == Room_Phase_CHOOSING;
 
@@ -688,16 +504,29 @@ void UpdateStage() {
   // Show the stage between the players once it's decided
   u8 show_stage = state->phase == Room_Phase_PICKING || state->phase == Room_Phase_PLAYING;
   CSBoxSelector_SetVisibility(data->stage_selector, show_stage);
-  CSIcon_SetMaterial(data->stage_selector->icon, state->stage);
+  CSIcon_SetMaterial(data->stage_selector->icon, stages[state->stage_idx]);
   Text_SetText(data->text, data->vs_subtext_id, show_stage || is_drafting ? "" : "VS");
 
-  u8 is_local_turn = turn != Room_Side_NONE && state->sides[turn] == 0;
-  for (int i = 0; i < STAGE_COUNT; i++) {
+  u8 is_local_turn = IsLocalTurn();
+  for (int i = 0; i < ROOM_STAGE_COUNT; i++) {
     CSBoxSelector *bs = data->stage_strike_selectors[i];
     CSBoxSelector_SetVisibility(bs, is_drafting);
     CSBoxSelector_SetSelectState(
         bs, state->struck[i] ? CSBoxSelector_Select_State_Disabled_X : CSBoxSelector_Select_State_NotSelected);
     CSBoxSelector_SetHover(bs, is_local_turn && is_drafting && data->selector_idx == i);
+  }
+
+  // Same timer as ranked, only warning the player whose turn it is
+  if (state->turn_seconds == 0xFF) {
+    Text_SetText(data->text, data->timer_subtext_id, "");
+  } else {
+    Text_SetText(data->text, data->timer_subtext_id, "%d:%02d", state->turn_seconds / 60, state->turn_seconds % 60);
+    Text_SetColor(data->text, data->timer_subtext_id, &text_color);
+    if (is_local_turn && state->turn_seconds <= PANIC_SECONDS) {
+      Text_SetColor(data->text, data->timer_subtext_id, &panic_color);
+    } else if (is_local_turn && state->turn_seconds <= WARN_SECONDS) {
+      Text_SetColor(data->text, data->timer_subtext_id, &warn_color);
+    }
   }
 
   char *turn_name = turn != Room_Side_NONE ? state->members[state->sides[turn]].name : "";
@@ -708,12 +537,12 @@ void UpdateStage() {
     sprintf(status, "%s chooses the stage", turn_name);
   } else if (state->phase == Room_Phase_PICKING) {
     sprintf(status, "%s is picking a character", turn_name);
+  } else if (state->phase == Room_Phase_PLAYING && data->handoff == Room_Handoff_FAILED) {
+    sprintf(status, "Could not connect, trying again");
+  } else if (state->phase == Room_Phase_PLAYING && LocalSide() != Room_Side_NONE) {
+    sprintf(status, "Connecting to your opponent");
   } else if (state->phase == Room_Phase_PLAYING) {
-    int idx = 0;
-    while (stages[idx] != state->stage) {
-      idx++;
-    }
-    sprintf(status, "Playing on %s", stage_names[idx]);
+    sprintf(status, "Playing on %s", stage_names[state->stage_idx]);
   } else if (state->crowned >= 0) {
     sprintf(status, "%s earned a crown", state->members[state->crowned].name);
   } else if (state->sides[Room_Side_CHALLENGER] >= 0) {
@@ -724,15 +553,17 @@ void UpdateStage() {
     sprintf(status, "Waiting for players");
   }
   Text_SetText(data->text, data->status_subtext_id, "%s", status);
+}
 
-  // Update button prompts
+void UpdatePrompts() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
   char *prompts[3] = {"START  Join the queue", "Hold B  Leave the room", ""};
-  if (QueuePos(0) >= 0) {
+  if (QueuePos(state->local_member) >= 0) {
     prompts[0] = "Hold Z  Leave the queue";
   } else if (CanChangeColor()) {
     prompts[0] = "X Y  Costume";
     prompts[2] = "Z  Random costume";
-  } else if (IsOnSide(0)) {
+  } else if (LocalSide() != Room_Side_NONE) {
     prompts[0] = "";
   }
 #ifdef LOCAL_TESTING
@@ -744,7 +575,7 @@ void UpdateStage() {
 }
 
 void UpdateList() {
-  Room_State *state = &data->state;
+  ExiSlippi_GetRoomState_Response *state = data->state;
   int line = 0;
   char name[40];
 
@@ -766,8 +597,8 @@ void UpdateList() {
   Text_SetText(data->list_text, line, "In the room");
   Text_SetColor(data->list_text, line++, &text_color);
   Text_SetPosition(data->right_text, data->count_subtext_id, LIST_RIGHT * 100 - 60, y);
-  if (data->scene_data->capacity != 0) {
-    Text_SetText(data->right_text, data->count_subtext_id, "%d\x81\x5e%d", state->member_count, data->scene_data->capacity);
+  if (state->capacity != 0) {
+    Text_SetText(data->right_text, data->count_subtext_id, "%d\x81\x5e%d", state->member_count, state->capacity);
   } else {
     Text_SetText(data->right_text, data->count_subtext_id, "%d", state->member_count);
   }
@@ -785,6 +616,116 @@ void UpdateList() {
   while (line < LIST_LINES) {
     Text_SetText(data->list_text, line++, "");
   }
+}
+
+// Keep the character picker open during the local player's pick, and close it if the
+// turn ends without one, such as when time runs out
+void UpdateCharPicker() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  u8 is_picking = state->phase == Room_Phase_PICKING && IsLocalTurn();
+  u8 is_open = data->char_picker_dialog->state.is_open;
+
+  if (is_picking && !is_open) {
+    ExiSlippi_RoomMember *m = &state->members[state->local_member];
+    CharPickerDialog_OpenDialog(data->char_picker_dialog, m->char_id, m->char_color);
+  } else if (!is_picking && is_open) {
+    CharPickerDialog_CloseDialog(data->char_picker_dialog);
+  }
+}
+
+// Once the room's match is on, find the opponent the same way direct does, send the room's
+// picks, then go to the match once both players are ready
+void HandleMatchHandoff() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  Room_Side side = LocalSide();
+  if (state->phase != Room_Phase_PLAYING || side == Room_Side_NONE) {
+    data->handoff = Room_Handoff_NONE;
+    return;
+  }
+
+#ifdef LOCAL_TESTING
+  // Test players without a real account are played with L and R instead
+  ExiSlippi_RoomMember *opp = &state->members[state->sides[!side]];
+  if (memcmp(opp->connect_code, "TEST", 4) == 0) {
+    return;
+  }
+#endif
+
+  data->handoff_frames++;
+
+  switch (data->handoff) {
+    case Room_Handoff_NONE:
+      FindOpponent();
+      data->handoff = Room_Handoff_SEARCHING;
+      data->handoff_frames = 0;
+      break;
+    case Room_Handoff_SEARCHING:
+      data->match_state = ExiSlippi_LoadMatchState(data->match_state);
+      if (data->match_state->mm_state == ExiSlippi_MmState_CONNECTION_SUCCESS) {
+        SetMatchSelections();
+        data->handoff = Room_Handoff_CONNECTED;
+      } else if (data->match_state->mm_state == ExiSlippi_MmState_ERROR_ENCOUNTERED ||
+                 data->handoff_frames > CONNECT_TIMEOUT_FRAMES) {
+        CleanupConnection();
+        data->handoff = Room_Handoff_FAILED;
+        data->handoff_frames = 0;
+        UpdateStage();
+      }
+      break;
+    case Room_Handoff_CONNECTED:
+      data->match_state = ExiSlippi_LoadMatchState(data->match_state);
+      if (data->match_state->is_local_player_ready && data->match_state->is_remote_player_ready) {
+        data->scene_data->start_match = true;
+        data->should_exit = true;
+      } else if (data->match_state->mm_state != ExiSlippi_MmState_CONNECTION_SUCCESS) {
+        CleanupConnection();
+        data->handoff = Room_Handoff_FAILED;
+        data->handoff_frames = 0;
+        UpdateStage();
+      }
+      break;
+    case Room_Handoff_FAILED:
+      if (data->handoff_frames >= CONNECT_RETRY_FRAMES) {
+        data->handoff = Room_Handoff_NONE;
+        UpdateStage();
+      }
+      break;
+  }
+}
+
+void FindOpponent() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  ExiSlippi_RoomMember *opp = &state->members[state->sides[!LocalSide()]];
+
+  ExiSlippi_FindOpponent_Query *q = calloc(sizeof(ExiSlippi_FindOpponent_Query));
+  q->command = ExiSlippi_Command_FIND_OPPONENT;
+  q->mode = ExiSlippi_OnlineMode_DIRECT;
+  memcpy(q->connect_code, opp->connect_code, sizeof(opp->connect_code));
+  ExiSlippi_Transfer(q, sizeof(ExiSlippi_FindOpponent_Query), ExiSlippi_TransferMode_WRITE);
+}
+
+// Both players send the room's stage, and Pokemon Stadium is never frozen
+void SetMatchSelections() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  Room_Side side = LocalSide();
+
+  ExiSlippi_SetSelections_Query *q = calloc(sizeof(ExiSlippi_SetSelections_Query));
+  q->command = ExiSlippi_Command_SET_MATCH_SELECTIONS;
+  q->team_id = 0;
+  q->char_id = state->play_char[side];
+  q->char_color_id = state->play_color[side];
+  q->char_option = ExiSlippi_SelectionOption_MERGE;
+  q->stage_id = CSIcon_ConvertMatToStage(stages[state->stage_idx]);
+  q->stage_option = ExiSlippi_SelectionOption_MERGE;
+  q->online_mode = ExiSlippi_OnlineMode_DIRECT;
+  q->alt_stage_mode = 0;
+  ExiSlippi_Transfer(q, sizeof(ExiSlippi_SetSelections_Query), ExiSlippi_TransferMode_WRITE);
+}
+
+void CleanupConnection() {
+  ExiSlippi_CleanupConnection_Query *q = calloc(sizeof(ExiSlippi_CleanupConnection_Query));
+  q->command = ExiSlippi_Command_CLEANUP_CONNECTION;
+  ExiSlippi_Transfer(q, sizeof(ExiSlippi_CleanupConnection_Query), ExiSlippi_TransferMode_WRITE);
 }
 
 u8 GetVanilaMaxColors(u8 charId) {
@@ -830,30 +771,35 @@ u8 GetNextColor(u8 char_id, u8 color_id, int incr) {
 }
 
 void OnCharSelectionComplete(CharPickerDialog *cpd, u8 is_selection) {
-  Room_Side side = TurnSide();
-  if (!is_selection || side == Room_Side_NONE) {
+  if (!is_selection || !IsLocalTurn()) {
     return;
   }
 
   // The picker resolves random before closing, so use where its cursor was last frame
   u8 char_id = data->prev_picker_char >= CKIND_RANDOM ? CKIND_RANDOM : cpd->state.char_selection_idx;
-  Pick(side, char_id, cpd->state.char_color_idx);
+  u8 char_color = char_id < CKIND_RANDOM ? cpd->state.char_color_idx : 0;
+  SendAction(ExiSlippi_RoomAction_PICK, char_id, char_color);
+  SFX_PlayCommon(CommonSound_ACCEPT);
+
+  // Remember the local player's pick for the next room
+  data->scene_data->last_char = char_id;
+  data->scene_data->last_color = char_color;
 }
 
 // Active players can change color once they have picked a character
 u8 CanChangeColor() {
-  Room_State *state = &data->state;
-  if (!IsOnSide(0) || state->phase == Room_Phase_PLAYING) {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  Room_Side side = LocalSide();
+  if (side == Room_Side_NONE || state->phase == Room_Phase_PLAYING) {
     return false;
   }
 
-  Room_Side side = state->sides[Room_Side_WINNER] == 0 ? Room_Side_WINNER : Room_Side_CHALLENGER;
-  return state->has_picked[side] && state->members[0].char_id < CKIND_RANDOM;
+  return state->has_picked[side] && state->members[state->local_member].char_id < CKIND_RANDOM;
 }
 
 // X and Y cycle colors, Z picks a random one
 void HandleColorInputs(u64 downInputs) {
-  Room_Member *m = &data->state.members[0];
+  ExiSlippi_RoomMember *m = &data->state->members[data->state->local_member];
   u8 char_color = m->char_color;
 
   if (downInputs & HSD_BUTTON_X) {
@@ -866,16 +812,16 @@ void HandleColorInputs(u64 downInputs) {
     return;
   }
 
-  SetColor(0, char_color);
+  SendAction(ExiSlippi_RoomAction_SET_COLOR, char_color, 0);
   SFX_PlayCommon(CommonSound_NEXT);
-  UpdateStage();
+  data->scene_data->last_color = char_color;
 }
 
 // Leaving the queue (Z) or the room (B) requires holding the button. The prompt fades to
 // yellow while it's held
 void HandleHoldInputs(u64 heldInputs) {
   int idx = -1;
-  if (heldInputs & HSD_TRIGGER_Z && QueuePos(0) >= 0) {
+  if (heldInputs & HSD_TRIGGER_Z && QueuePos(data->state->local_member) >= 0) {
     idx = 0;
   } else if (heldInputs & HSD_BUTTON_B) {
     idx = 1;
@@ -904,15 +850,14 @@ void HandleHoldInputs(u64 heldInputs) {
   data->hold_idx = -1;
   SFX_PlayCommon(CommonSound_BACK);
   if (idx == 0) {
-    LeaveQueue(0);
-    OnQueueChange();
+    SendAction(ExiSlippi_RoomAction_LEAVE_QUEUE, 0, 0);
   } else {
-    data->should_exit = true;
+    LeaveRoom();
   }
 }
 
 void HandleStageInputs(u64 downInputs, u64 scrollInputs) {
-  Room_State *state = &data->state;
+  ExiSlippi_GetRoomState_Response *state = data->state;
   int dir = 0;
   if (scrollInputs & (HSD_BUTTON_RIGHT | HSD_BUTTON_DPAD_RIGHT)) {
     dir = 1;
@@ -923,15 +868,26 @@ void HandleStageInputs(u64 downInputs, u64 scrollInputs) {
   // Skip over struck stages
   if (dir != 0) {
     do {
-      data->selector_idx = (data->selector_idx + dir + STAGE_COUNT) % STAGE_COUNT;
+      data->selector_idx = (data->selector_idx + dir + ROOM_STAGE_COUNT) % ROOM_STAGE_COUNT;
     } while (state->struck[data->selector_idx]);
     SFX_PlayCommon(CommonSound_NEXT);
     UpdateStage();
   } else if (downInputs & HSD_BUTTON_A && state->phase == Room_Phase_STRIKING) {
-    Strike(data->selector_idx);
+    SendAction(ExiSlippi_RoomAction_STRIKE, data->selector_idx, 0);
+    SFX_PlayCommon(CommonSound_NEXT);
   } else if (downInputs & HSD_BUTTON_A) {
-    Choose(data->selector_idx);
+    SendAction(ExiSlippi_RoomAction_CHOOSE, data->selector_idx, 0);
+    SFX_PlayCommon(CommonSound_ACCEPT);
   }
+}
+
+void LeaveRoom() {
+  if (data->handoff != Room_Handoff_NONE) {
+    CleanupConnection();
+  }
+
+  SendAction(ExiSlippi_RoomAction_LEAVE_ROOM, 0, 0);
+  data->should_exit = true;
 }
 
 void CObjThink(GOBJ *gobj) {
@@ -948,10 +904,25 @@ void CObjThink(GOBJ *gobj) {
 }
 
 void InputsThink(GOBJ *gobj) {
-  Room_State *state = &data->state;
+  ExiSlippi_GetRoomState_Response *state = data->state;
   u8 port = R13_U8(-0x5108);
   u64 downInputs = Pad_GetDown(port);
   u64 scrollInputs = Pad_GetRapidHeld(port);
+
+  if (data->should_exit) {
+    return;
+  }
+
+  // Only leaving is possible until the room is joined
+  if (!IsInRoom()) {
+    if (state->connection_status == ExiSlippi_RoomStatus_FAILED && downInputs & HSD_BUTTON_B) {
+      SFX_PlayCommon(CommonSound_BACK);
+      LeaveRoom();
+    } else {
+      HandleHoldInputs(Pad_GetHeld(port));
+    }
+    return;
+  }
 
   // The picker handles its own inputs. This runs before the picker, so save its cursor
   // before a press resolves random
@@ -961,9 +932,8 @@ void InputsThink(GOBJ *gobj) {
     return;
   }
 
-  Room_Side turn = TurnSide();
   u8 is_drafting = state->phase == Room_Phase_STRIKING || state->phase == Room_Phase_CHOOSING;
-  if (is_drafting && turn != Room_Side_NONE && state->sides[turn] == 0) {
+  if (is_drafting && IsLocalTurn()) {
     HandleStageInputs(downInputs, scrollInputs);
   }
 
@@ -971,10 +941,9 @@ void InputsThink(GOBJ *gobj) {
     HandleColorInputs(downInputs);
   }
 
-  if (downInputs & HSD_BUTTON_START && QueuePos(0) < 0 && !IsOnSide(0)) {
-    JoinQueue(0);
+  if (downInputs & HSD_BUTTON_START && QueuePos(state->local_member) < 0 && !IsOnSide(state->local_member)) {
+    SendAction(ExiSlippi_RoomAction_JOIN_QUEUE, 0, 0);
     SFX_PlayCommon(CommonSound_ACCEPT);
-    OnQueueChange();
   }
 
   HandleHoldInputs(Pad_GetHeld(port));
@@ -982,21 +951,11 @@ void InputsThink(GOBJ *gobj) {
 #ifdef LOCAL_TESTING
   // L and R pick the winner during a match, otherwise L adds a test player
   if (state->phase == Room_Phase_PLAYING && downInputs & (HSD_TRIGGER_L | HSD_TRIGGER_R)) {
-    FinishSet(downInputs & HSD_TRIGGER_L ? Room_Side_WINNER : Room_Side_CHALLENGER);
+    SendAction(ExiSlippi_RoomAction_FINISH_SET, downInputs & HSD_TRIGGER_L ? Room_Side_WINNER : Room_Side_CHALLENGER, 0);
     SFX_PlayCommon(CommonSound_ACCEPT);
   } else if (downInputs & HSD_TRIGGER_L) {
-    char name[31];
-    char connect_code[10];
-    sprintf(name, "Player %d", state->member_count + 1);
-
-    // 0x8194 is the # in Melee's font
-    sprintf(connect_code, "TEST\x81\x94%d", state->member_count + 1);
-    int member = AddMember(name, connect_code);
-    if (member >= 0) {
-      JoinQueue(member);
-      SFX_PlayCommon(CommonSound_ACCEPT);
-      OnQueueChange();
-    }
+    SendAction(ExiSlippi_RoomAction_ADD_TEST_PLAYER, 0, 0);
+    SFX_PlayCommon(CommonSound_ACCEPT);
   }
 #endif
 }

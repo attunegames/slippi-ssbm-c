@@ -8,11 +8,8 @@
 #pragma pack(1)
 typedef struct Rooms_SceneData {
   u8 enter_room;
-  u8 visibility;
-  u8 mode;
-  u8 capacity;  // 0 is no limit
-  u8 stage_mode;
-  u8 last_char;  // Local player's last pick, kept between rooms
+  u8 start_match;  // Set by the room when its match is ready to start
+  u8 last_char;    // Local player's last pick, kept between rooms
   u8 last_color;
 } Rooms_SceneData;
 #pragma pack()
