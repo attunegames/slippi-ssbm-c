@@ -40,6 +40,7 @@ static char *join_errors[] = {
     "Could not connect to the room",
     "Lost connection to the room",
     "The room did not let you in",
+    "The room closed after an hour without activity",
 };
 
 const GXColor text_color = {255, 255, 255, 255};
@@ -51,6 +52,7 @@ void minor_load(Rooms_SceneData *minor_data) {
   data = calloc(sizeof(Room_Data));
   data->scene_data = minor_data;
   data->hold_idx = -1;
+  data->confirm_idx = -1;
 
   // Allocate some memory used throughout
   data->state_query = calloc(sizeof(ExiSlippi_GetRoomState_Query));
@@ -152,6 +154,10 @@ void minor_think() {
   if (IsInRoom()) {
     UpdateCharPicker();
     HandleMatchHandoff();
+  }
+
+  if (data->notice_frames > 0 && --data->notice_frames == 0 && IsInRoom()) {
+    UpdateStage();
   }
 }
 
@@ -318,6 +324,10 @@ void OnStateChange() {
     }
   }
 
+  if (HasHostChanged()) {
+    data->notice_frames = NOTICE_FRAMES;
+  }
+
   // Warn the local player when their time is almost up
   if (IsLocalTurn() && state->turn_seconds == PANIC_SECONDS && prev->turn_seconds != PANIC_SECONDS) {
     SFX_PlayCommon(CommonSound_OFFSCREEN);
@@ -387,7 +397,18 @@ void GetDisplayName(char *out, int member) {
 // Whether we're hosting the room or have joined it, rather than still joining
 u8 IsInRoom() {
   u8 status = data->state->connection_status;
-  return status == ExiSlippi_RoomStatus_HOSTING || status == ExiSlippi_RoomStatus_JOINED;
+  return status == ExiSlippi_RoomStatus_HOSTING || status == ExiSlippi_RoomStatus_JOINED ||
+         status == ExiSlippi_RoomStatus_RECONNECTING;
+}
+
+// A member takes over when the host leaves or drops, so the host can change at any time
+u8 HasHostChanged() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  ExiSlippi_GetRoomState_Response *prev = data->prev_state;
+  if (state->host_member == 0xFF || prev->host_member == 0xFF) {
+    return false;
+  }
+  return strcmp(state->members[state->host_member].connect_code, prev->members[prev->host_member].connect_code) != 0;
 }
 
 // The code arrives once the room is registered, and stays empty if it couldn't be
@@ -442,6 +463,10 @@ void UpdateJoining() {
   }
   Text_SetText(data->right_text, data->count_subtext_id, "");
 
+  if (data->confirm_idx >= 0) {
+    ShowConfirm();
+    return;
+  }
   Text_SetText(data->text, data->prompt_subtext_ids[0], "");
   Text_SetText(data->text, data->prompt_subtext_ids[1], is_failed ? "B  Back" : "Hold B  Leave");
   Text_SetText(data->text, data->prompt_subtext_ids[2], "");
@@ -531,7 +556,11 @@ void UpdateStage() {
 
   char *turn_name = turn != Room_Side_NONE ? state->members[state->sides[turn]].name : "";
   char status[64];
-  if (state->phase == Room_Phase_STRIKING) {
+  if (state->connection_status == ExiSlippi_RoomStatus_RECONNECTING) {
+    sprintf(status, "Reconnecting to the room");
+  } else if (data->notice_frames > 0 && state->host_member != 0xFF) {
+    sprintf(status, "%s is now hosting", state->members[state->host_member].name);
+  } else if (state->phase == Room_Phase_STRIKING) {
     sprintf(status, "%s strikes a stage", turn_name);
   } else if (state->phase == Room_Phase_CHOOSING) {
     sprintf(status, "%s chooses the stage", turn_name);
@@ -557,6 +586,11 @@ void UpdateStage() {
 
 void UpdatePrompts() {
   ExiSlippi_GetRoomState_Response *state = data->state;
+  if (data->confirm_idx >= 0) {
+    ShowConfirm();
+    return;
+  }
+
   char *prompts[3] = {"START  Join the queue", "Hold B  Leave the room", ""};
   if (QueuePos(state->local_member) >= 0) {
     prompts[0] = "Hold Z  Leave the queue";
@@ -597,11 +631,7 @@ void UpdateList() {
   Text_SetText(data->list_text, line, "In the room");
   Text_SetColor(data->list_text, line++, &text_color);
   Text_SetPosition(data->right_text, data->count_subtext_id, LIST_RIGHT * 100 - 60, y);
-  if (state->capacity != 0) {
-    Text_SetText(data->right_text, data->count_subtext_id, "%d\x81\x5e%d", state->member_count, state->capacity);
-  } else {
-    Text_SetText(data->right_text, data->count_subtext_id, "%d", state->member_count);
-  }
+  Text_SetText(data->right_text, data->count_subtext_id, "%d\x81\x5e%d", state->member_count, state->capacity);
 
   // Members who aren't playing or queued
   for (int i = 0; i < state->member_count && line < LIST_LINES; i++) {
@@ -622,10 +652,14 @@ void UpdateList() {
 // turn ends without one, such as when time runs out
 void UpdateCharPicker() {
   ExiSlippi_GetRoomState_Response *state = data->state;
-  u8 is_picking = state->phase == Room_Phase_PICKING && IsLocalTurn();
+  u8 is_picking = state->phase == Room_Phase_PICKING && IsLocalTurn() &&
+                  state->connection_status != ExiSlippi_RoomStatus_RECONNECTING;
   u8 is_open = data->char_picker_dialog->state.is_open;
 
-  if (is_picking && !is_open) {
+  // B backs out of the picker, so it stays closed while B is held to leave or a leave is confirmed
+  u8 is_leaving = (Pad_GetHeld(R13_U8(-0x5108)) & HSD_BUTTON_B) || data->confirm_idx >= 0;
+
+  if (is_picking && !is_open && !is_leaving) {
     ExiSlippi_RoomMember *m = &state->members[state->local_member];
     CharPickerDialog_OpenDialog(data->char_picker_dialog, m->char_id, m->char_color);
   } else if (!is_picking && is_open) {
@@ -848,11 +882,41 @@ void HandleHoldInputs(u64 heldInputs) {
   }
 
   data->hold_idx = -1;
+  data->confirm_idx = idx;
+  SFX_PlayCommon(CommonSound_NEXT);
+  ShowConfirm();
+}
+
+// A finished hold is only acted on once A confirms it
+void ShowConfirm() {
+  char *actions[2] = {"A  Leave the queue", "A  Leave the room"};
+  Text_SetText(data->text, data->prompt_subtext_ids[0], actions[data->confirm_idx]);
+  Text_SetText(data->text, data->prompt_subtext_ids[1], "B  Stay");
+  Text_SetText(data->text, data->prompt_subtext_ids[2], "");
+  for (int i = 0; i < 3; i++) {
+    Text_SetColor(data->text, data->prompt_subtext_ids[i], &text_color);
+  }
+}
+
+void HandleConfirmInputs(u64 downInputs) {
+  int idx = data->confirm_idx;
+  if (!(downInputs & (HSD_BUTTON_A | HSD_BUTTON_B))) {
+    return;
+  }
+
+  data->confirm_idx = -1;
   SFX_PlayCommon(CommonSound_BACK);
-  if (idx == 0) {
+  if (downInputs & HSD_BUTTON_A && idx == 0) {
     SendAction(ExiSlippi_RoomAction_LEAVE_QUEUE, 0, 0);
-  } else {
+  } else if (downInputs & HSD_BUTTON_A) {
     LeaveRoom();
+    return;
+  }
+
+  if (IsInRoom()) {
+    UpdatePrompts();
+  } else {
+    UpdateJoining();
   }
 }
 
@@ -913,6 +977,11 @@ void InputsThink(GOBJ *gobj) {
     return;
   }
 
+  if (data->confirm_idx >= 0) {
+    HandleConfirmInputs(downInputs);
+    return;
+  }
+
   // Only leaving is possible until the room is joined
   if (!IsInRoom()) {
     if (state->connection_status == ExiSlippi_RoomStatus_FAILED && downInputs & HSD_BUTTON_B) {
@@ -921,6 +990,12 @@ void InputsThink(GOBJ *gobj) {
     } else {
       HandleHoldInputs(Pad_GetHeld(port));
     }
+    return;
+  }
+
+  // Only leaving is possible while the room is being found again
+  if (state->connection_status == ExiSlippi_RoomStatus_RECONNECTING) {
+    HandleHoldInputs(Pad_GetHeld(port));
     return;
   }
 

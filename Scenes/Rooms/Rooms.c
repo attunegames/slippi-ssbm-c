@@ -17,8 +17,8 @@ static char *create_labels[CREATE_PILL_COUNT] = {"Create", "Cancel"};
 static char *join_labels[JOIN_PILL_COUNT] = {"Join", "Cancel"};
 
 static char *visibility_labels[] = {"Public", "Private"};
-static char *size_labels[] = {"2", "4", "8", "16", "32", "No limit"};
-static u8 size_values[] = {2, 4, 8, 16, 32, 0};
+static char *size_labels[] = {"2", "4", "8", "16", "32"};
+static u8 size_values[] = {2, 4, 8, 16, 32};
 static char *stage_labels[] = {"Random", "Draft"};
 
 // Create form settings, in Rooms_Setting order. Modes and sizes are drawn narrower to fit
@@ -26,7 +26,7 @@ static char *stage_labels[] = {"Random", "Draft"};
 static Rooms_SettingInfo settings[CREATE_SETTINGS] = {
     {"VISIBILITY", visibility_labels, 2, ROW_NAME_SCALE_X},
     {"MODE", mode_labels, PILL_COUNT, CREATE_NARROW_SCALE_X},
-    {"LOBBY SIZE", size_labels, 6, CREATE_NARROW_SCALE_X},
+    {"LOBBY SIZE", size_labels, 5, CREATE_NARROW_SCALE_X},
     {"STAGES", stage_labels, 2, ROW_NAME_SCALE_X},
 };
 
@@ -463,6 +463,10 @@ void UpdateList() {
   data->visible_count = 0;
   for (int i = 0; i < room_count && data->visible_count < LIST_ROWS; i++) {
     Rooms_Room *room = &rooms[i];
+    if (room->is_rejoin) {
+      data->visible[data->visible_count++] = i;
+      continue;
+    }
     if (data->mode_filter && !((data->mode_filter >> room->mode) & 1)) {
       continue;
     }
@@ -488,14 +492,14 @@ void UpdateList() {
 
     Rooms_Room *room = &rooms[data->visible[i]];
     Text_SetText(data->name_text[i], 0, "%s", room->code);
-    Text_SetText(data->name_text[i], 1, "%s", room->host);
+    Text_SetText(data->name_text[i], 1, "%s", room->is_rejoin ? "Rejoin" : room->host);
     Text_SetText(data->name_text[i], 2, room->region == REGION_UNKNOWN ? "" : region_labels[room->region]);
-    Text_SetText(data->mode_text[i], 0, mode_labels[room->mode]);
+    Text_SetText(data->mode_text[i], 0, room->is_rejoin ? "" : mode_labels[room->mode]);
     // 0x815e is the slash in Melee's font
-    if (room->capacity != 0) {
-      Text_SetText(data->size_text[i], 0, "%d\x81\x5e%d", room->players, room->capacity);
+    if (room->is_rejoin) {
+      Text_SetText(data->size_text[i], 0, "");
     } else {
-      Text_SetText(data->size_text[i], 0, "%d", room->players);
+      Text_SetText(data->size_text[i], 0, "%d\x81\x5e%d", room->players, room->capacity);
     }
     data->size_text[i]->scale.X = room->capacity >= 10 ? ROW_COUNT_LONG_SCALE_X : ROW_COUNT_SCALE_X;
 
@@ -709,10 +713,27 @@ void PollRoomList() {
   }
 
   data->list_status = data->list->status;
-  room_count = data->list->count < LIST_ROWS ? data->list->count : LIST_ROWS;
-  for (int i = 0; i < room_count; i++) {
+  room_count = 0;
+
+  if (data->list->rejoin_code[0]) {
+    Rooms_Room *room = &rooms[room_count++];
+    memset(room, 0, sizeof(Rooms_Room));
+    memcpy(room->code, data->list->rejoin_code, sizeof(room->code));
+    memcpy(room->password, data->list->rejoin_password, sizeof(room->password));
+    room->region = REGION_UNKNOWN;
+    room->is_rejoin = true;
+  }
+
+  for (int i = 0; i < data->list->count && room_count < LIST_ROWS; i++) {
     ExiSlippi_RoomListing *l = &data->list->rooms[i];
-    Rooms_Room *room = &rooms[i];
+
+    // A public room being rejoined is already listed first
+    if (rooms[0].is_rejoin && memcmp(l->code, rooms[0].code, CODE_DIGITS) == 0) {
+      continue;
+    }
+
+    Rooms_Room *room = &rooms[room_count++];
+    memset(room, 0, sizeof(Rooms_Room));
     memcpy(room->code, l->code, sizeof(room->code));
     memcpy(room->host, l->host_name, sizeof(room->host));
     room->mode = l->mode;
@@ -938,7 +959,8 @@ void InputsThink(GOBJ *gobj) {
       SFX_PlayCommon(CommonSound_NEXT);
       changed = true;
     } else if (downInputs & HSD_BUTTON_A) {
-      JoinRoom(rooms[data->visible[data->row_idx]].code, "");
+      Rooms_Room *room = &rooms[data->visible[data->row_idx]];
+      JoinRoom(room->code, room->password);
     } else if (downInputs & HSD_BUTTON_B) {
       SFX_PlayCommon(CommonSound_BACK);
       data->should_exit = true;

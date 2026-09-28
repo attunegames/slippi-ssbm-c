@@ -62,6 +62,7 @@ typedef enum ExiSlippi_RoomStatus {
   ExiSlippi_RoomStatus_JOINING,
   ExiSlippi_RoomStatus_JOINED,
   ExiSlippi_RoomStatus_FAILED,
+  ExiSlippi_RoomStatus_RECONNECTING,  // The host changed and the room is being rejoined
 } ExiSlippi_RoomStatus;
 
 typedef enum ExiSlippi_RoomError {
@@ -74,6 +75,7 @@ typedef enum ExiSlippi_RoomError {
   ExiSlippi_RoomError_UNREACHABLE,
   ExiSlippi_RoomError_DISCONNECTED,
   ExiSlippi_RoomError_REJECTED,
+  ExiSlippi_RoomError_IDLE,  // The room closed after an hour without activity
 } ExiSlippi_RoomError;
 
 typedef enum ExiSlippi_RoomListStatus {
@@ -195,7 +197,7 @@ typedef struct ExiSlippi_CreateRoom_Query {
   u8 command;
   u8 visibility;
   u8 mode;
-  u8 capacity;  // 0 is no limit
+  u8 capacity;
   u8 stage_mode;
   u8 last_char;
   u8 last_color;
@@ -244,6 +246,7 @@ typedef struct ExiSlippi_GetRoomState_Response {
   u8 play_char[2];
   u8 play_color[2];
   u8 turn_seconds;  // 0xFF when it's nobody's turn
+  u8 host_member;   // 0xFF while nobody is hosting
 } ExiSlippi_GetRoomState_Response;
 
 typedef struct ExiSlippi_JoinRoom_Query {
@@ -275,6 +278,8 @@ typedef struct ExiSlippi_GetRoomList_Response {
   u8 status;
   u8 count;
   ExiSlippi_RoomListing rooms[ROOM_LIST_MAX];
+  char rejoin_code[5];  // The last room, after a crash. Empty when there's nothing to rejoin
+  char rejoin_password[5];
 } ExiSlippi_GetRoomList_Response;
 
 typedef struct ExiSlippi_CleanupConnection_Query {

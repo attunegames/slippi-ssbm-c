@@ -136,11 +136,13 @@ typedef struct Rooms_SettingInfo {
 
 typedef struct Rooms_Room {
   char code[5];
+  char password[5];  // Only known for the room being rejoined
   char host[31];
   u8 mode;
   u8 region;
   u8 players;
-  u8 capacity;  // 0 is no limit
+  u8 capacity;
+  u8 is_rejoin;  // The room left by a crash, listed first so it can be rejoined
 } Rooms_Room;
 
 typedef struct Rooms_Data {

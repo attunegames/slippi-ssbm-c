@@ -39,6 +39,7 @@
 #define PROMPT_GAP_X 1800
 
 #define HOLD_FRAMES 60
+#define NOTICE_FRAMES (60 * 4)
 #define WARN_SECONDS 10
 #define PANIC_SECONDS 3
 
@@ -95,6 +96,8 @@ typedef struct Room_Data {
   int prompt_subtext_ids[3];
   int hold_idx;  // Prompt being held, -1 if none
   int hold_frames;
+  int confirm_idx;    // Finished hold waiting for A, -1 if none
+  int notice_frames;  // Showing who hosts now after the host changed
   CSBoxSelector *char_selectors[2];
   CSBoxSelector *stage_selector;
   CSBoxSelector *stage_strike_selectors[ROOM_STAGE_COUNT];
@@ -126,6 +129,7 @@ Room_Side TurnSide();
 u8 IsLocalTurn();
 void GetDisplayName(char *out, int member);
 u8 IsInRoom();
+u8 HasHostChanged();
 void UpdateHeader();
 void UpdateJoining();
 void UpdateStage();
@@ -142,6 +146,8 @@ void OnCharSelectionComplete(CharPickerDialog *cpd, u8 is_selection);
 u8 CanChangeColor();
 void HandleColorInputs(u64 downInputs);
 void HandleHoldInputs(u64 heldInputs);
+void ShowConfirm();
+void HandleConfirmInputs(u64 downInputs);
 void HandleStageInputs(u64 downInputs, u64 scrollInputs);
 void LeaveRoom();
 void CObjThink(GOBJ *gobj);
