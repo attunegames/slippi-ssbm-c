@@ -47,6 +47,43 @@
 #define PILL_SHIFT 0.149
 #define LIST_ROWS 9
 
+// The create and join screens fill the list area with a label row above each bar.
+// Choices and digits are spread evenly across a bar, left of its count box, and a
+// bar's middle is this far right of where it sits
+#define FORM_LEFT_X -9.7
+#define FORM_RIGHT_X 7.6
+#define BAR_CENTER_X 1.1
+
+#define CREATE_SETTINGS 4
+#define CREATE_PILL_COUNT 2
+#define CREATE_NARROW_SCALE_X 0.022
+
+// The join screen: a room code and a password, both typed on a number keypad.
+// Typing fills the code first and carries on into the password
+#define CODE_DIGITS 4
+#define PASSWORD_DIGITS 4
+#define ENTRY_DIGITS (CODE_DIGITS + PASSWORD_DIGITS)
+#define JOIN_PILL_COUNT 2
+#define JOIN_CODE_ROW 1
+#define JOIN_PASSWORD_ROW 3
+#define KEYPAD_FIRST_ROW 5
+#define KEYPAD_ROWS 4
+#define KEYPAD_COLUMNS 3
+#define KEYPAD_GAP_X 4.0
+#define KEYPAD_SCALE_X 0.038
+
+// A row bar and the list cursor, shrunk to highlight one key
+#define KEY_SCALE 0.15
+
+// A second cursor, narrowed to one digit's slot, marks where the next digit goes
+#define SLOT_SCALE 0.19
+
+typedef enum Rooms_Screen {
+  Rooms_Screen_LIST,
+  Rooms_Screen_CREATE,
+  Rooms_Screen_JOIN,
+} Rooms_Screen;
+
 typedef enum Rooms_Focus {
   Rooms_Focus_LIST,
   Rooms_Focus_PILLS,
@@ -56,6 +93,8 @@ typedef enum Rooms_PillRow {
   Rooms_PillRow_MAIN,
   Rooms_PillRow_MODE,
   Rooms_PillRow_REGION,
+  Rooms_PillRow_CREATE,
+  Rooms_PillRow_JOIN,
 } Rooms_PillRow;
 
 typedef enum Rooms_MainPill {
@@ -65,6 +104,23 @@ typedef enum Rooms_MainPill {
   Rooms_MainPill_REGION,
   Rooms_MainPill_RANDOM,
 } Rooms_MainPill;
+
+typedef enum Rooms_CreatePill {
+  Rooms_CreatePill_CREATE,
+  Rooms_CreatePill_CANCEL,
+} Rooms_CreatePill;
+
+typedef enum Rooms_JoinPill {
+  Rooms_JoinPill_JOIN,
+  Rooms_JoinPill_CANCEL,
+} Rooms_JoinPill;
+
+typedef struct Rooms_SettingInfo {
+  char *title;
+  char **choices;
+  int count;
+  float scale_x;
+} Rooms_SettingInfo;
 
 typedef struct Rooms_Room {
   char *code;
@@ -84,17 +140,31 @@ typedef struct Rooms_Data {
   Text *mode_text[LIST_ROWS];
   Text *size_text[LIST_ROWS];
   Text *empty_text;
+  Text *choice_text[CREATE_SETTINGS];
+  Text *code_text;
+  Text *password_text;
+  Text *keypad_text[KEYPAD_ROWS];
   JOBJ *rows[LIST_ROWS];
   JOBJ *cursor;
+  JOBJ *key_bar;
+  JOBJ *slot_cursor;
   JOBJ *list_end;
+  JOBJ *side_label;
   Vec3 row_pos;
   Vec3 row_step;
+  Rooms_Screen screen;
   Rooms_Focus focus;
   Rooms_PillRow pill_row;
   int pill_idx;
   int row_idx;
   int visible[LIST_ROWS];
   int visible_count;
+  int setting_idx;
+  int choices[CREATE_SETTINGS];
+  u8 entry[ENTRY_DIGITS];
+  int entry_len;
+  int key_row;
+  int key_col;
   u8 mode_filter;
   u8 region_filter;
   u8 should_exit;
@@ -106,13 +176,28 @@ JOBJ *LoadPanel();
 JOBJ *GetJoint(JOBJ *root, int index);
 void SetLabel(DOBJ *dobj, char *image);
 void HideJoint(JOBJ *jobj);
+void ShowJoint(JOBJ *jobj);
 JOBJ *InitPill(JOBJ *panel, int joint, float x, float scale);
 void InitRows(JOBJ *panel);
 Text *CreateRowText(int row, float x, float scale_x, float width);
+Text *CreateSlotText(int row, int count, float scale_x);
+Text *CreateKeypadText(int row);
 void SetRowPos(JOBJ *jobj, float row);
 u8 IsPillOn(int idx);
+int PillCount();
 void UpdatePills();
+void ClearRow(int row);
+void ClearListArea();
+void PlaceModel(JOBJ *jobj, float row, float x, float scale_x);
 void UpdateList();
+void UpdateCreate();
+void UpdateEntry(Text *text, int row, int first, int count);
+void UpdateJoin();
+void OpenCreate();
+void OpenJoin();
+void CloseForm();
+u8 HandleCreateInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs);
+u8 HandleKeypadInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs);
 void PlayAlert();
 void HandlePillPress();
 void CObjThink(GOBJ *gobj);
