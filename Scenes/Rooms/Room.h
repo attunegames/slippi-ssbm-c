@@ -36,6 +36,20 @@
 
 #define LIST_LINES 9
 #define LIST_LINE_GAP 250
+#define LIST_TEXT_INSET_X 110
+
+// Bars behind the players in the list, made from the character picker's box by moving its corners
+#define LIST_BAR_CENTER_X 16.75
+#define LIST_BAR_HALF_WIDTH 7.4
+#define LIST_BAR_HALF_HEIGHT 0.45
+#define LIST_BAR_Y_OFFSET 0.55
+#define LIST_BAR_Z 0.2
+#define LIST_TEXT_GXLINK 5
+
+// The list's text gets a dark shadow and a second pass a little to the right, which thickens
+// Melee's thin font against the moving background
+#define LIST_SHADOW_OFFSET 9
+#define LIST_BOLD_OFFSET 5
 #define PROMPT_GAP_X 2000
 
 #define HOLD_FRAMES 60
@@ -82,8 +96,10 @@ typedef struct Room_Data {
   Text *left_text;
   Text *right_text;
   Text *list_text;
+  Text *list_shadow_text;
+  Text *list_bold_text;
+  JOBJ *list_bars[LIST_LINES];
   int name_subtext_ids[2];
-  int code_subtext_ids[2];
   int password_subtext_id;
   int code_subtext_id;
   int mode_subtext_id;
@@ -93,7 +109,6 @@ typedef struct Room_Data {
   int vs_subtext_id;
   int status_subtext_id;
   int watch_subtext_id;  // Under the status while the room's match can be watched
-  int count_subtext_id;
   int prompt_subtext_ids[3];
   int hold_idx;  // Prompt being held, -1 if none
   int hold_frames;
@@ -114,8 +129,11 @@ typedef struct Room_Data {
 JOBJ *LoadPanels();
 JOBJ *GetJoint(JOBJ *root, int index);
 void HideJoint(JOBJ *jobj);
+JOBJ *LoadListBar(int line);
+void ShowListBar(int line, u8 is_shown);
+void SetListLine(int line, const GXColor *color, char *str);
 void SetFrameSides(JOBJ *panels, float left, float right);
-Text *CreateText(u8 align);
+Text *CreateText(int canvas, u8 align);
 int AddSubtext(Text *text, float x, float y, float scale, char *str);
 void InitHeader();
 void InitStage();
@@ -145,6 +163,7 @@ void CleanupConnection();
 u8 GetVanilaMaxColors(u8 charId);
 u8 GetNextColor(u8 char_id, u8 color_id, int incr);
 void OnCharSelectionComplete(CharPickerDialog *cpd, u8 is_selection);
+u8 IsWaitingToPlay();
 u8 CanChangeColor();
 void HandleColorInputs(u64 downInputs);
 void HandleHoldInputs(u64 heldInputs);
@@ -156,6 +175,7 @@ void StartPractice();
 u8 CanWatch();
 void WatchMatch();
 void CObjThink(GOBJ *gobj);
+void TextCObjThink(GOBJ *gobj);
 void InputsThink(GOBJ *gobj);
 
 #endif  // SLIPPI_ROOM_H

@@ -44,7 +44,9 @@ static char *join_errors[] = {
 };
 
 const GXColor text_color = {255, 255, 255, 255};
-const GXColor dim_color = {128, 128, 128, 255};
+const GXColor dim_color = {190, 190, 195, 255};
+const GXColor shadow_color = {0, 0, 0, 255};
+const GXColor list_bar_color = {48, 48, 54, 255};
 const GXColor warn_color = {254, 202, 52, 255};
 const GXColor panic_color = {255, 50, 50, 255};
 
@@ -84,6 +86,16 @@ void minor_load(Rooms_SceneData *minor_data) {
   // Indicates which gx_links to render
   cam_gobj->cobj_links = (1 << 0) + (1 << 1) + (1 << 2) + (1 << 3) + (1 << 4);
 
+  // Like the rooms list, the list's names are drawn by a second camera after everything else, so they
+  // sit on the bars behind them. It tilts with the main camera to stay lined up
+  GOBJ *text_cam_gobj = GObj_Create(2, 3, 128);
+  COBJ *text_cam_cobj = COBJ_LoadDesc(gui_assets->cobjs[0]);
+  GObj_AddObject(text_cam_gobj, 1, text_cam_cobj);
+  GOBJ_InitCamera(text_cam_gobj, TextCObjThink, 1);
+  GObj_AddProc(text_cam_gobj, MainMenu_CamRotateThink, 5);
+  text_cam_gobj->cobj_links = 1 << LIST_TEXT_GXLINK;
+  int list_canvas = Text_CreateCanvas(0, (int)text_cam_gobj, 11, 11, 0, LIST_TEXT_GXLINK, 0, 0);
+
   // store cobj to static pointer, needed for MainMenu_CamRotateThink
   void **stc_cam_cobj = (R13 + (-0x4ADC));
   *stc_cam_cobj = gui_assets->cobjs[0];
@@ -115,10 +127,12 @@ void minor_load(Rooms_SceneData *minor_data) {
   SetFrameSides(list_panels, LIST_LEFT, LIST_RIGHT);
 
   // Prepare text
-  data->text = CreateText(1);
-  data->left_text = CreateText(0);
-  data->right_text = CreateText(2);
-  data->list_text = CreateText(0);
+  data->text = CreateText(0, 1);
+  data->left_text = CreateText(0, 0);
+  data->right_text = CreateText(0, 2);
+  data->list_shadow_text = CreateText(list_canvas, 0);
+  data->list_bold_text = CreateText(list_canvas, 0);
+  data->list_text = CreateText(list_canvas, 0);
 
   InitHeader();
   InitStage();
@@ -213,8 +227,8 @@ void SetFrameSides(JOBJ *panels, float left, float right) {
 
 // Same text setup as ranked. Subtext positions are 100 units per world unit, with y
 // pointing down
-Text *CreateText(u8 align) {
-  Text *text = Text_CreateText(0, 0);
+Text *CreateText(int canvas, u8 align) {
+  Text *text = Text_CreateText(0, canvas);
   text->kerning = 1;
   text->align = align;
   text->use_aspect = 1;
@@ -254,9 +268,7 @@ void InitStage() {
     CSBoxSelector_SetPos(bs, (Vec3){xs[i], STAGE_BOX_Y, 0});
     data->char_selectors[i] = bs;
 
-    data->name_subtext_ids[i] = AddSubtext(data->text, xs[i] * 100, -900, 4, "");
-    data->code_subtext_ids[i] = AddSubtext(data->text, xs[i] * 100, -720, 3, "");
-    Text_SetColor(data->text, data->code_subtext_ids[i], &dim_color);
+    data->name_subtext_ids[i] = AddSubtext(data->text, xs[i] * 100, -720, 4, "");
   }
 
   // Win streak, under the winner
@@ -280,19 +292,77 @@ void InitStage() {
   data->watch_subtext_id = AddSubtext(data->text, STAGE_CENTER_X * 100, 325, 3.2, "");
 }
 
-// The queue, followed by the rest of the room
+// The queue, followed by the rest of the room. Each player gets a bar behind their name
 void InitList() {
   for (int i = 0; i < LIST_LINES; i++) {
-    AddSubtext(data->list_text, LIST_LEFT * 100 + 60, -880 + LIST_LINE_GAP * i, 3.5, "");
+    float x = LIST_LEFT * 100 + LIST_TEXT_INSET_X;
+    float y = -880 + LIST_LINE_GAP * i;
+    AddSubtext(data->list_shadow_text, x + LIST_SHADOW_OFFSET, y + LIST_SHADOW_OFFSET, 3.5, "");
+    Text_SetColor(data->list_shadow_text, i, &shadow_color);
+    AddSubtext(data->list_bold_text, x + LIST_BOLD_OFFSET, y, 3.5, "");
+    AddSubtext(data->list_text, x, y, 3.5, "");
+    data->list_bars[i] = LoadListBar(i);
   }
 
-  data->count_subtext_id = AddSubtext(data->right_text, LIST_RIGHT * 100 - 60, 0, 3.5, "");
 }
 
 // Button prompts in the bottom panel
 void InitPrompts() {
   for (int i = 0; i < 3; i++) {
     data->prompt_subtext_ids[i] = AddSubtext(data->text, (i - 1) * PROMPT_GAP_X, 1640, 3.6, "");
+  }
+}
+
+// The character picker's dark box, reshaped into a bar by moving its corners, the way FlatTexture
+// places its corners. Hidden until a player is on its line
+JOBJ *LoadListBar(int line) {
+  GOBJ *gobj = JOBJ_LoadSet(0, gui_assets->jobjs[GUI_GameSetup_JOBJ_CharDialog], 0, 0, 3, 1, 0, 0);
+  JOBJ *jobj = gobj->hsd_object;
+
+  // The picker raises its box toward the camera, which would make the bar bigger than its corners say
+  JOBJ *layer = jobj->child;
+  layer->trans.Z = LIST_BAR_Z;
+
+  // A flat, solid color rather than the picker's see-through bordered texture. Each loaded copy has
+  // its own material, so the picker keeps its look
+  JOBJ *box = layer->child;
+  MOBJ *mobj = box->dobj->mobj;
+  mobj->rendermode &= ~(RENDER_TEXTURES | RENDER_XLU | CHANNEL_FIELD | RENDER_ALPHA_BITS);
+  mobj->rendermode |= RENDER_CONSTANT;
+  mobj->mat->diffuse = list_bar_color;
+  mobj->mat->alpha = 1;
+
+  // Top right, bottom left, top left and bottom right
+  JOBJ *corner = box->child;
+  float w = LIST_BAR_HALF_WIDTH;
+  float h = LIST_BAR_HALF_HEIGHT;
+  corner->trans = (Vec3){w, h, 0};
+  corner->sibling->trans = (Vec3){-w, -h, 0};
+  corner->sibling->sibling->trans = (Vec3){-w, h, 0};
+  corner->sibling->sibling->sibling->trans = (Vec3){w, -h, 0};
+
+  // Text y points down while the scene's y points up
+  jobj->trans.X = LIST_BAR_CENTER_X;
+  jobj->trans.Y = (880 - LIST_LINE_GAP * line) / 100.0 - LIST_BAR_Y_OFFSET;
+  JOBJ_SetMtxDirtySub(jobj);
+  JOBJ_SetFlagsAll(jobj, JOBJ_HIDDEN);
+  return jobj;
+}
+
+// Sets a list line on the text and on its shadow and bold passes
+void SetListLine(int line, const GXColor *color, char *str) {
+  Text_SetText(data->list_shadow_text, line, "%s", str);
+  Text_SetText(data->list_bold_text, line, "%s", str);
+  Text_SetText(data->list_text, line, "%s", str);
+  Text_SetColor(data->list_bold_text, line, color);
+  Text_SetColor(data->list_text, line, color);
+}
+
+void ShowListBar(int line, u8 is_shown) {
+  if (is_shown) {
+    JOBJ_ClearFlagsAll(data->list_bars[line], JOBJ_HIDDEN);
+  } else {
+    JOBJ_SetFlagsAll(data->list_bars[line], JOBJ_HIDDEN);
   }
 }
 
@@ -456,7 +526,6 @@ void UpdateJoining() {
   for (int i = 0; i < 2; i++) {
     CSBoxSelector_SetVisibility(data->char_selectors[i], false);
     Text_SetText(data->text, data->name_subtext_ids[i], "");
-    Text_SetText(data->text, data->code_subtext_ids[i], "");
   }
   CSBoxSelector_SetVisibility(data->stage_selector, false);
   for (int i = 0; i < ROOM_STAGE_COUNT; i++) {
@@ -475,9 +544,9 @@ void UpdateJoining() {
   }
 
   for (int i = 0; i < LIST_LINES; i++) {
-    Text_SetText(data->list_text, i, "");
+    SetListLine(i, &text_color, "");
+    ShowListBar(i, false);
   }
-  Text_SetText(data->right_text, data->count_subtext_id, "");
 
   if (data->confirm_idx >= 0) {
     ShowConfirm();
@@ -501,13 +570,11 @@ void UpdateStage() {
     if (member < 0) {
       Text_SetText(data->text, data->name_subtext_ids[side], "Waiting");
       Text_SetColor(data->text, data->name_subtext_ids[side], &dim_color);
-      Text_SetText(data->text, data->code_subtext_ids[side], "");
     } else {
       char name[40];
       GetDisplayName(name, member);
       Text_SetText(data->text, data->name_subtext_ids[side], "%s", name);
       Text_SetColor(data->text, data->name_subtext_ids[side], &text_color);
-      Text_SetText(data->text, data->code_subtext_ids[side], "%s", state->members[member].connect_code);
     }
 
     // Show a question mark until the side has picked. Random stays hidden until the
@@ -624,7 +691,7 @@ void UpdatePrompts() {
   }
 
   char *prompts[3] = {"START  Join the queue", "Hold B  Leave the room", ""};
-  if (QueuePos(state->local_member) >= 0) {
+  if (IsWaitingToPlay()) {
     prompts[0] = "Hold Z  Leave the queue";
     prompts[2] = "START  Practice";
   } else if (CanChangeColor()) {
@@ -646,25 +713,27 @@ void UpdateList() {
   int line = 0;
   char name[40];
 
-  Text_SetText(data->list_text, line, "Up next");
-  Text_SetColor(data->list_text, line++, &text_color);
+  for (int i = 0; i < LIST_LINES; i++) {
+    ShowListBar(i, false);
+  }
+
+  SetListLine(line++, &text_color, "Up next");
 
   if (state->queue_count == 0) {
-    Text_SetText(data->list_text, line, "Nobody in the queue");
-    Text_SetColor(data->list_text, line++, &dim_color);
+    SetListLine(line++, &dim_color, "Nobody in the queue");
   }
   for (int i = 0; i < state->queue_count && line < LIST_LINES - 2; i++) {
+    char entry[48];
     GetDisplayName(name, state->queue[i]);
-    Text_SetText(data->list_text, line, "%d  %s", i + 1, name);
-    Text_SetColor(data->list_text, line++, &text_color);
+    sprintf(entry, "%d  %s", i + 1, name);
+    SetListLine(line, &text_color, entry);
+    ShowListBar(line++, true);
   }
 
-  // Member count next to the heading. 0x815e is the slash in Melee's font
-  float y = -880 + LIST_LINE_GAP * line;
-  Text_SetText(data->list_text, line, "In the room");
-  Text_SetColor(data->list_text, line++, &text_color);
-  Text_SetPosition(data->right_text, data->count_subtext_id, LIST_RIGHT * 100 - 60, y);
-  Text_SetText(data->right_text, data->count_subtext_id, "%d\x81\x5e%d", state->member_count, state->capacity);
+  // Member count beside the heading. 0x815e is the slash in Melee's font
+  char lobby[24];
+  sprintf(lobby, "Lobby  %d\x81\x5e%d", state->member_count, state->capacity);
+  SetListLine(line++, &text_color, lobby);
 
   // Members who aren't playing or queued
   for (int i = 0; i < state->member_count && line < LIST_LINES; i++) {
@@ -672,12 +741,12 @@ void UpdateList() {
       continue;
     }
     GetDisplayName(name, i);
-    Text_SetText(data->list_text, line, "%s", name);
-    Text_SetColor(data->list_text, line++, &dim_color);
+    SetListLine(line, &text_color, name);
+    ShowListBar(line++, true);
   }
 
   while (line < LIST_LINES) {
-    Text_SetText(data->list_text, line++, "");
+    SetListLine(line++, &text_color, "");
   }
 }
 
@@ -865,11 +934,24 @@ void OnCharSelectionComplete(CharPickerDialog *cpd, u8 is_selection) {
   data->scene_data->last_color = char_color;
 }
 
-// Active players can change color once they have picked a character
+// In the queue, or on a side with nobody to play yet, such as a winner nobody has challenged. Either
+// can leave the queue with Z or practice until the room calls them up
+u8 IsWaitingToPlay() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  if (QueuePos(state->local_member) >= 0) {
+    return true;
+  }
+
+  Room_Side side = LocalSide();
+  return side != Room_Side_NONE && state->phase == Room_Phase_WAITING && state->sides[!side] < 0;
+}
+
+// Active players can change color once they have picked a character and have someone to play. Z
+// leaves the queue until then
 u8 CanChangeColor() {
   ExiSlippi_GetRoomState_Response *state = data->state;
   Room_Side side = LocalSide();
-  if (side == Room_Side_NONE || state->phase == Room_Phase_PLAYING) {
+  if (side == Room_Side_NONE || state->phase == Room_Phase_PLAYING || IsWaitingToPlay()) {
     return false;
   }
 
@@ -900,7 +982,7 @@ void HandleColorInputs(u64 downInputs) {
 // yellow while it's held
 void HandleHoldInputs(u64 heldInputs) {
   int idx = -1;
-  if (heldInputs & HSD_TRIGGER_Z && QueuePos(data->state->local_member) >= 0) {
+  if (heldInputs & HSD_TRIGGER_Z && IsWaitingToPlay()) {
     idx = 0;
   } else if (heldInputs & HSD_BUTTON_B) {
     idx = 1;
@@ -1004,7 +1086,7 @@ void WatchMatch() {
   SFX_PlayCommon(CommonSound_ACCEPT);
 }
 
-// Queued players can practice while they wait. Practice ends itself once the room calls them up
+// Players waiting to play can practice meanwhile. Practice ends itself once the room calls them up
 void StartPractice() {
   data->scene_data->start_practice = true;
   SFX_PlayCommon(CommonSound_ACCEPT);
@@ -1018,6 +1100,17 @@ void LeaveRoom() {
 
   SendAction(ExiSlippi_RoomAction_LEAVE_ROOM, 0, 0);
   data->should_exit = true;
+}
+
+void TextCObjThink(GOBJ *gobj) {
+  COBJ *cobj = gobj->hsd_object;
+
+  if (!CObj_SetCurrent(cobj)) {
+    return;
+  }
+
+  CObj_RenderGXLinks(gobj, 7);
+  CObj_EndCurrent();
 }
 
 void CObjThink(GOBJ *gobj) {
@@ -1085,7 +1178,7 @@ void InputsThink(GOBJ *gobj) {
   if (downInputs & HSD_BUTTON_START && QueuePos(state->local_member) < 0 && !IsOnSide(state->local_member)) {
     SendAction(ExiSlippi_RoomAction_JOIN_QUEUE, 0, 0);
     SFX_PlayCommon(CommonSound_ACCEPT);
-  } else if (downInputs & HSD_BUTTON_START && QueuePos(state->local_member) >= 0) {
+  } else if (downInputs & HSD_BUTTON_START && IsWaitingToPlay()) {
     StartPractice();
   }
 
