@@ -6,7 +6,6 @@
 typedef enum ExiSlippi_Command {
   ExiSlippi_Command_FIND_OPPONENT = 0xB4,
   ExiSlippi_Command_SET_MATCH_SELECTIONS = 0xB5,
-  ExiSlippi_Command_GET_ONLINE_STATUS = 0xB9,
   ExiSlippi_Command_CLEANUP_CONNECTION = 0xBA,
   ExiSlippi_Command_OVERWRITE_SELECTIONS = 0xBF,
   ExiSlippi_Command_GP_COMPLETE_STEP = 0xC0,
@@ -20,6 +19,8 @@ typedef enum ExiSlippi_Command {
   ExiSlippi_Command_JOIN_ROOM = 0xC8,
   ExiSlippi_Command_FETCH_ROOM_LIST = 0xC9,
   ExiSlippi_Command_GET_ROOM_LIST = 0xCA,
+  ExiSlippi_Command_ROOM_PRACTICE_OVER = 0xCB,  // Sent by the asm while practicing
+  ExiSlippi_Command_ROOM_WATCH = 0xCC,
   ExiSlippi_Command_GET_RANK = 0xE3,
   ExiSlippi_Command_FETCH_RANK = 0xE4
 } ExiSlippi_Command;
@@ -78,6 +79,13 @@ typedef enum ExiSlippi_RoomError {
   ExiSlippi_RoomError_IDLE,  // The room closed after an hour without activity
 } ExiSlippi_RoomError;
 
+typedef enum ExiSlippi_WatchStatus {
+  ExiSlippi_WatchStatus_NONE,
+  ExiSlippi_WatchStatus_CONNECTING,
+  ExiSlippi_WatchStatus_READY,
+  ExiSlippi_WatchStatus_FAILED,
+} ExiSlippi_WatchStatus;
+
 typedef enum ExiSlippi_RoomListStatus {
   ExiSlippi_RoomListStatus_FETCHING,
   ExiSlippi_RoomListStatus_FETCHED,
@@ -86,7 +94,7 @@ typedef enum ExiSlippi_RoomListStatus {
 
 #define ROOM_MAX_MEMBERS 32
 #define ROOM_STAGE_COUNT 6
-#define ROOM_LIST_MAX 9
+#define ROOM_LIST_MAX 50  // As many as the directory lists
 
 typedef enum ExiSlippi_MmState {
   ExiSlippi_MmState_UNSET,
@@ -183,16 +191,6 @@ typedef struct ExiSlippi_MatchState_Response {
   char matchmake_id[51];
 } ExiSlippi_MatchState_Response;
 
-typedef struct ExiSlippi_GetOnlineStatus_Query {
-  u8 command;
-} ExiSlippi_GetOnlineStatus_Query;
-
-typedef struct ExiSlippi_GetOnlineStatus_Response {
-  u8 app_state;
-  char display_name[31];
-  char connect_code[10];
-} ExiSlippi_GetOnlineStatus_Response;
-
 typedef struct ExiSlippi_CreateRoom_Query {
   u8 command;
   u8 visibility;
@@ -247,7 +245,13 @@ typedef struct ExiSlippi_GetRoomState_Response {
   u8 play_color[2];
   u8 turn_seconds;  // 0xFF when it's nobody's turn
   u8 host_member;   // 0xFF while nobody is hosting
+  u8 watch_status;  // ExiSlippi_WatchStatus
+  u8 match_over;    // The match ended without a result, and the room replays it shortly
 } ExiSlippi_GetRoomState_Response;
+
+typedef struct ExiSlippi_RoomWatch_Query {
+  u8 command;
+} ExiSlippi_RoomWatch_Query;
 
 typedef struct ExiSlippi_JoinRoom_Query {
   u8 command;
@@ -272,6 +276,7 @@ typedef struct ExiSlippi_RoomListing {
   u8 stage_mode;
   u8 capacity;
   u8 member_count;
+  u8 region;  // 0xFF when unknown
 } ExiSlippi_RoomListing;
 
 typedef struct ExiSlippi_GetRoomList_Response {

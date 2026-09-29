@@ -61,10 +61,10 @@ void minor_load(Rooms_SceneData *minor_data) {
   data->action_query = calloc(sizeof(ExiSlippi_RoomAction_Query));
   data->match_state = ExiSlippi_LoadMatchState(0);
 
-  // Coming back from the room's match
+  // Coming back from the room's match. The room is told once the state is in, see OnStateChange
   if (minor_data->start_match) {
     minor_data->start_match = false;
-    SendAction(ExiSlippi_RoomAction_MATCH_ENDED, 0, 0);
+    data->is_back_from_match = true;
   }
 
   // Set up input handler. Initialize at top to make sure it runs before anything else
@@ -154,6 +154,13 @@ void minor_think() {
   if (IsInRoom()) {
     UpdateCharPicker();
     HandleMatchHandoff();
+  }
+
+  // Watchers go straight to the match, the same way its players do
+  if (data->state->watch_status == ExiSlippi_WatchStatus_READY) {
+    data->scene_data->start_watch = true;
+    data->should_exit = true;
+    return;
   }
 
   if (data->notice_frames > 0 && --data->notice_frames == 0 && IsInRoom()) {
@@ -270,6 +277,7 @@ void InitStage() {
   data->vs_subtext_id = AddSubtext(data->text, STAGE_CENTER_X * 100, -330, 5, "VS");
   data->status_subtext_id = AddSubtext(data->text, STAGE_CENTER_X * 100, 520, 3.5, "");
   Text_SetColor(data->text, data->status_subtext_id, &dim_color);
+  data->watch_subtext_id = AddSubtext(data->text, STAGE_CENTER_X * 100, 325, 3.2, "");
 }
 
 // The queue, followed by the rest of the room
@@ -284,7 +292,7 @@ void InitList() {
 // Button prompts in the bottom panel
 void InitPrompts() {
   for (int i = 0; i < 3; i++) {
-    data->prompt_subtext_ids[i] = AddSubtext(data->text, (i - 1) * PROMPT_GAP_X, 1640, 4, "");
+    data->prompt_subtext_ids[i] = AddSubtext(data->text, (i - 1) * PROMPT_GAP_X, 1640, 3.6, "");
   }
 }
 
@@ -326,6 +334,13 @@ void OnStateChange() {
 
   if (HasHostChanged()) {
     data->notice_frames = NOTICE_FRAMES;
+  }
+
+  // Tells the room the match ended without a result, again if the room missed it, such as while
+  // its host changed. The room ignores it once it knows
+  if (data->is_back_from_match && state->phase == Room_Phase_PLAYING && !state->match_over &&
+      LocalSide() != Room_Side_NONE) {
+    SendAction(ExiSlippi_RoomAction_MATCH_ENDED, 0, 0);
   }
 
   // Warn the local player when their time is almost up
@@ -450,6 +465,7 @@ void UpdateJoining() {
   Text_SetText(data->text, data->vs_subtext_id, "");
   Text_SetText(data->text, data->streak_subtext_id, "");
   Text_SetText(data->text, data->timer_subtext_id, "");
+  Text_SetText(data->text, data->watch_subtext_id, "");
 
   u8 error = state->connection_error < sizeof(join_errors) / sizeof(join_errors[0]) ? state->connection_error : 0;
   if (is_failed) {
@@ -558,6 +574,14 @@ void UpdateStage() {
   char status[64];
   if (state->connection_status == ExiSlippi_RoomStatus_RECONNECTING) {
     sprintf(status, "Reconnecting to the room");
+  } else if (state->connection_status == ExiSlippi_RoomStatus_HOSTING &&
+             state->connection_error == ExiSlippi_RoomError_UNAVAILABLE) {
+    // The room keeps trying to register, and has no code to join by until it does
+    sprintf(status, "Rooms are unavailable, nobody can join yet");
+  } else if (state->watch_status == ExiSlippi_WatchStatus_CONNECTING) {
+    sprintf(status, "Connecting to the match");
+  } else if (state->watch_status == ExiSlippi_WatchStatus_FAILED && state->phase == Room_Phase_PLAYING) {
+    sprintf(status, "Could not watch the match");
   } else if (data->notice_frames > 0 && state->host_member != 0xFF) {
     sprintf(status, "%s is now hosting", state->members[state->host_member].name);
   } else if (state->phase == Room_Phase_STRIKING) {
@@ -566,6 +590,9 @@ void UpdateStage() {
     sprintf(status, "%s chooses the stage", turn_name);
   } else if (state->phase == Room_Phase_PICKING) {
     sprintf(status, "%s is picking a character", turn_name);
+  } else if (state->phase == Room_Phase_PLAYING &&
+             (state->match_over || (data->is_back_from_match && LocalSide() != Room_Side_NONE))) {
+    sprintf(status, "The match did not finish");
   } else if (state->phase == Room_Phase_PLAYING && data->handoff == Room_Handoff_FAILED) {
     sprintf(status, "Could not connect, trying again");
   } else if (state->phase == Room_Phase_PLAYING && LocalSide() != Room_Side_NONE) {
@@ -582,6 +609,11 @@ void UpdateStage() {
     sprintf(status, "Waiting for players");
   }
   Text_SetText(data->text, data->status_subtext_id, "%s", status);
+
+  // Watching is offered between the match and its status while it's being played, and again after a
+  // watch failed
+  u8 show_watch = CanWatch() && state->watch_status != ExiSlippi_WatchStatus_CONNECTING;
+  Text_SetText(data->text, data->watch_subtext_id, show_watch ? "Y  Watch" : "");
 }
 
 void UpdatePrompts() {
@@ -594,6 +626,7 @@ void UpdatePrompts() {
   char *prompts[3] = {"START  Join the queue", "Hold B  Leave the room", ""};
   if (QueuePos(state->local_member) >= 0) {
     prompts[0] = "Hold Z  Leave the queue";
+    prompts[2] = "START  Practice";
   } else if (CanChangeColor()) {
     prompts[0] = "X Y  Costume";
     prompts[2] = "Z  Random costume";
@@ -673,7 +706,19 @@ void HandleMatchHandoff() {
   ExiSlippi_GetRoomState_Response *state = data->state;
   Room_Side side = LocalSide();
   if (state->phase != Room_Phase_PLAYING || side == Room_Side_NONE) {
+    // The set can end while this player is still looking for their opponent, such as when the
+    // opponent drops. The search has to stop here, or the next match starts a second one on top of it
+    if (data->handoff == Room_Handoff_SEARCHING || data->handoff == Room_Handoff_CONNECTED) {
+      CleanupConnection();
+    }
     data->handoff = Room_Handoff_NONE;
+    data->is_back_from_match = false;
+    return;
+  }
+
+  // A match that ended without a result is replayed by the room after a moment, or settled if the
+  // opponent dropped. Searching for them meanwhile could start a match the room isn't tracking
+  if (data->is_back_from_match) {
     return;
   }
 
@@ -945,6 +990,27 @@ void HandleStageInputs(u64 downInputs, u64 scrollInputs) {
   }
 }
 
+// Anyone not playing can watch the match the room is playing, but not one that already ended
+u8 CanWatch() {
+  ExiSlippi_GetRoomState_Response *state = data->state;
+  return state->phase == Room_Phase_PLAYING && !state->match_over && LocalSide() == Room_Side_NONE &&
+         state->connection_status != ExiSlippi_RoomStatus_RECONNECTING;
+}
+
+void WatchMatch() {
+  ExiSlippi_RoomWatch_Query *q = calloc(sizeof(ExiSlippi_RoomWatch_Query));
+  q->command = ExiSlippi_Command_ROOM_WATCH;
+  ExiSlippi_Transfer(q, sizeof(ExiSlippi_RoomWatch_Query), ExiSlippi_TransferMode_WRITE);
+  SFX_PlayCommon(CommonSound_ACCEPT);
+}
+
+// Queued players can practice while they wait. Practice ends itself once the room calls them up
+void StartPractice() {
+  data->scene_data->start_practice = true;
+  SFX_PlayCommon(CommonSound_ACCEPT);
+  data->should_exit = true;
+}
+
 void LeaveRoom() {
   if (data->handoff != Room_Handoff_NONE) {
     CleanupConnection();
@@ -1019,6 +1085,12 @@ void InputsThink(GOBJ *gobj) {
   if (downInputs & HSD_BUTTON_START && QueuePos(state->local_member) < 0 && !IsOnSide(state->local_member)) {
     SendAction(ExiSlippi_RoomAction_JOIN_QUEUE, 0, 0);
     SFX_PlayCommon(CommonSound_ACCEPT);
+  } else if (downInputs & HSD_BUTTON_START && QueuePos(state->local_member) >= 0) {
+    StartPractice();
+  }
+
+  if (downInputs & HSD_BUTTON_Y && CanWatch() && state->watch_status != ExiSlippi_WatchStatus_CONNECTING) {
+    WatchMatch();
   }
 
   HandleHoldInputs(Pad_GetHeld(port));

@@ -6,8 +6,9 @@ static HSD_Archive *trophy_archive;
 static HSD_Archive *gui_archive;
 static Rooms_Data *data;
 
-// Public rooms, fetched from the rooms directory
-static Rooms_Room rooms[LIST_ROWS];
+// Public rooms, fetched from the rooms directory. Allocated with the scene rather than kept in the
+// module, which has to stay small
+static Rooms_Room *rooms;
 static int room_count = 0;
 
 static char *main_labels[PILL_COUNT] = {"Create", "Join", "Mode", "Region", "Random"};
@@ -46,14 +47,19 @@ const GXColor row_selected_color = {0, 0, 0, 255};
 const GXColor label_color = {150, 215, 140, 255};
 const GXColor unchosen_color = {70, 70, 80, 255};
 const GXColor unchosen_selected_row_color = {150, 150, 160, 255};
+const GXColor disabled_color = {45, 45, 50, 255};
+const GXColor disabled_selected_row_color = {165, 165, 172, 255};
 
 void minor_load(Rooms_SceneData *minor_data) {
   data = calloc(sizeof(Rooms_Data));
   data->scene_data = minor_data;
   minor_data->enter_room = false;
 
+  data->fetch_query = calloc(sizeof(ExiSlippi_FetchRoomList_Query));
   data->list_query = calloc(sizeof(ExiSlippi_GetRoomList_Query));
   data->list = calloc(sizeof(ExiSlippi_GetRoomList_Response));
+  rooms = calloc(sizeof(Rooms_Room) * ROOM_SLOTS);
+  room_count = 0;
   FetchRoomList();
 
   // Set up input handler. Initialize at top to make sure it runs before anything else
@@ -447,21 +453,10 @@ void PlaceModel(JOBJ *jobj, float row, float x, float scale_x) {
   jobj->trans.X += x;
 }
 
-void UpdateList() {
-  ClearListArea();
-  if (data->screen == Rooms_Screen_CREATE) {
-    UpdateCreate();
-    return;
-  }
-  if (data->screen == Rooms_Screen_JOIN) {
-    UpdateJoin();
-    return;
-  }
-
-  ShowJoint(data->side_label);
-
+// Picks the rooms the filters let through, keeping the cursor on one of them and scrolled into view
+void FilterRooms() {
   data->visible_count = 0;
-  for (int i = 0; i < room_count && data->visible_count < LIST_ROWS; i++) {
+  for (int i = 0; i < room_count; i++) {
     Rooms_Room *room = &rooms[i];
     if (room->is_rejoin) {
       data->visible[data->visible_count++] = i;
@@ -483,14 +478,40 @@ void UpdateList() {
     data->focus = Rooms_Focus_PILLS;
   }
 
+  if (data->row_idx < data->scroll) {
+    data->scroll = data->row_idx;
+  } else if (data->row_idx >= data->scroll + LIST_ROWS) {
+    data->scroll = data->row_idx - LIST_ROWS + 1;
+  }
+  int max_scroll = data->visible_count > LIST_ROWS ? data->visible_count - LIST_ROWS : 0;
+  if (data->scroll > max_scroll) {
+    data->scroll = max_scroll;
+  }
+}
+
+void UpdateList() {
+  ClearListArea();
+  if (data->screen == Rooms_Screen_CREATE) {
+    UpdateCreate();
+    return;
+  }
+  if (data->screen == Rooms_Screen_JOIN) {
+    UpdateJoin();
+    return;
+  }
+
+  ShowJoint(data->side_label);
+  FilterRooms();
+
   for (int i = 0; i < LIST_ROWS; i++) {
-    if (i >= data->visible_count) {
+    int idx = data->scroll + i;
+    if (idx >= data->visible_count) {
       continue;
     }
 
     JOBJ_ClearFlagsAll(data->rows[i], JOBJ_HIDDEN);
 
-    Rooms_Room *room = &rooms[data->visible[i]];
+    Rooms_Room *room = &rooms[data->visible[idx]];
     Text_SetText(data->name_text[i], 0, "%s", room->code);
     Text_SetText(data->name_text[i], 1, "%s", room->is_rejoin ? "Rejoin" : room->host);
     Text_SetText(data->name_text[i], 2, room->region == REGION_UNKNOWN ? "" : region_labels[room->region]);
@@ -504,7 +525,7 @@ void UpdateList() {
     data->size_text[i]->scale.X = room->capacity >= 10 ? ROW_COUNT_LONG_SCALE_X : ROW_COUNT_SCALE_X;
 
     const GXColor *col = &row_color;
-    if (data->focus == Rooms_Focus_LIST && data->row_idx == i) {
+    if (data->focus == Rooms_Focus_LIST && data->row_idx == idx) {
       col = &row_selected_color;
     }
     Text_SetColor(data->name_text[i], 0, col);
@@ -523,12 +544,16 @@ void UpdateList() {
     }
     Text_SetText(data->empty_text, 0, msg);
   } else {
-    JOBJ_ClearFlagsAll(data->list_end, JOBJ_HIDDEN);
-    SetRowPos(data->list_end, data->visible_count - 1);
+    // The red line only goes under the last room, not under a row with more below it
+    int last_row = data->visible_count - 1 - data->scroll;
+    if (last_row < LIST_ROWS) {
+      JOBJ_ClearFlagsAll(data->list_end, JOBJ_HIDDEN);
+      SetRowPos(data->list_end, last_row);
+    }
   }
 
   if (data->focus == Rooms_Focus_LIST) {
-    PlaceModel(data->cursor, data->row_idx, 0, 1);
+    PlaceModel(data->cursor, data->row_idx - data->scroll, 0, 1);
   }
 }
 
@@ -548,6 +573,8 @@ void UpdateCreate() {
       const GXColor *col = is_current ? &unchosen_selected_row_color : &unchosen_color;
       if (data->choices[i] == j) {
         col = is_current ? &row_selected_color : &row_color;
+      } else if (!IsChoiceEnabled(i, j)) {
+        col = is_current ? &disabled_selected_row_color : &disabled_color;
       }
       Text_SetText(data->choice_text[i], j, settings[i].choices[j]);
       Text_SetColor(data->choice_text[i], j, col);
@@ -682,9 +709,8 @@ void JoinRoom(char *code, char *password) {
 }
 
 void FetchRoomList() {
-  ExiSlippi_FetchRoomList_Query *q = calloc(sizeof(ExiSlippi_FetchRoomList_Query));
-  q->command = ExiSlippi_Command_FETCH_ROOM_LIST;
-  ExiSlippi_Transfer(q, sizeof(ExiSlippi_FetchRoomList_Query), ExiSlippi_TransferMode_WRITE);
+  data->fetch_query->command = ExiSlippi_Command_FETCH_ROOM_LIST;
+  ExiSlippi_Transfer(data->fetch_query, sizeof(ExiSlippi_FetchRoomList_Query), ExiSlippi_TransferMode_WRITE);
 
   data->list_status = ExiSlippi_RoomListStatus_FETCHING;
   data->list_frames = 0;
@@ -713,6 +739,13 @@ void PollRoomList() {
   }
 
   data->list_status = data->list->status;
+
+  // The cursor stays on the room it was on, since the refreshed list can be in a different order
+  char selected[CODE_DIGITS] = {0};
+  if (data->visible_count > 0) {
+    memcpy(selected, rooms[data->visible[data->row_idx]].code, CODE_DIGITS);
+  }
+
   room_count = 0;
 
   if (data->list->rejoin_code[0]) {
@@ -724,11 +757,11 @@ void PollRoomList() {
     room->is_rejoin = true;
   }
 
-  for (int i = 0; i < data->list->count && room_count < LIST_ROWS; i++) {
+  for (int i = 0; i < data->list->count && room_count < ROOM_SLOTS; i++) {
     ExiSlippi_RoomListing *l = &data->list->rooms[i];
 
     // A public room being rejoined is already listed first
-    if (rooms[0].is_rejoin && memcmp(l->code, rooms[0].code, CODE_DIGITS) == 0) {
+    if (room_count > 0 && rooms[0].is_rejoin && memcmp(l->code, rooms[0].code, CODE_DIGITS) == 0) {
       continue;
     }
 
@@ -737,9 +770,17 @@ void PollRoomList() {
     memcpy(room->code, l->code, sizeof(room->code));
     memcpy(room->host, l->host_name, sizeof(room->host));
     room->mode = l->mode;
-    room->region = REGION_UNKNOWN;
+    room->region = l->region < PILL_COUNT ? l->region : REGION_UNKNOWN;
     room->players = l->member_count;
     room->capacity = l->capacity;
+  }
+
+  FilterRooms();
+  for (int i = 0; i < data->visible_count; i++) {
+    if (memcmp(rooms[data->visible[i]].code, selected, CODE_DIGITS) == 0) {
+      data->row_idx = i;
+      break;
+    }
   }
 
   UpdateList();
@@ -805,11 +846,8 @@ void HandlePillPress() {
       SFX_PlayCommon(CommonSound_ACCEPT);
       break;
     case Rooms_MainPill_RANDOM:
-      if (data->visible_count == 0) {
-        PlayAlert();
-      } else {
-        SFX_PlayCommon(CommonSound_ACCEPT);
-      }
+      // Not available yet
+      PlayAlert();
       break;
     case Rooms_MainPill_CREATE:
       OpenCreate();
@@ -873,6 +911,11 @@ u8 HandleKeypadInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs) {
   return true;
 }
 
+// Only Singles can be played for now. The other modes are shown so players know they're coming
+u8 IsChoiceEnabled(int setting, int choice) {
+  return setting != Rooms_Setting_MODE || choice == 0;
+}
+
 // Up and down select a setting and left and right change it. Down from the last setting
 // moves to the pills and B closes the form
 u8 HandleCreateInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs) {
@@ -888,10 +931,17 @@ u8 HandleCreateInputs(u8 up, u8 down, u8 left, u8 right, u64 downInputs) {
       data->focus = Rooms_Focus_PILLS;
       data->pill_idx = Rooms_CreatePill_CREATE;
     }
-  } else if (left) {
-    *choice = (*choice + count - 1) % count;
-  } else if (right) {
-    *choice = (*choice + 1) % count;
+  } else if (left || right) {
+    int next = *choice;
+    do {
+      next = (next + (right ? 1 : count - 1)) % count;
+    } while (next != *choice && !IsChoiceEnabled(data->setting_idx, next));
+
+    if (next == *choice) {
+      SFX_PlayCommon(CommonSound_ERROR);
+      return false;
+    }
+    *choice = next;
   } else if (downInputs & HSD_BUTTON_B) {
     SFX_PlayCommon(CommonSound_BACK);
     CloseForm();
@@ -956,6 +1006,12 @@ void InputsThink(GOBJ *gobj) {
       } else {
         data->focus = Rooms_Focus_PILLS;
       }
+      SFX_PlayCommon(CommonSound_NEXT);
+      changed = true;
+    } else if (left || right) {
+      // Straight to Create, rather than down past every room
+      data->focus = Rooms_Focus_PILLS;
+      data->pill_idx = Rooms_MainPill_CREATE;
       SFX_PlayCommon(CommonSound_NEXT);
       changed = true;
     } else if (downInputs & HSD_BUTTON_A) {

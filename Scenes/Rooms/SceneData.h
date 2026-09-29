@@ -11,6 +11,8 @@ typedef struct Rooms_SceneData {
   u8 start_match;  // Set by the room when its match is ready to start
   u8 last_char;    // Local player's last pick, kept between rooms
   u8 last_color;
+  u8 start_practice;  // Set by the room when a queued player goes to practice
+  u8 start_watch;     // Set by the room when a watch of its match is ready
 } Rooms_SceneData;
 #pragma pack()
 

@@ -36,7 +36,7 @@
 
 #define LIST_LINES 9
 #define LIST_LINE_GAP 250
-#define PROMPT_GAP_X 1800
+#define PROMPT_GAP_X 2000
 
 #define HOLD_FRAMES 60
 #define NOTICE_FRAMES (60 * 4)
@@ -92,6 +92,7 @@ typedef struct Room_Data {
   int streak_subtext_id;
   int vs_subtext_id;
   int status_subtext_id;
+  int watch_subtext_id;  // Under the status while the room's match can be watched
   int count_subtext_id;
   int prompt_subtext_ids[3];
   int hold_idx;  // Prompt being held, -1 if none
@@ -106,6 +107,7 @@ typedef struct Room_Data {
   u8 prev_picker_char;
   Room_Handoff handoff;
   int handoff_frames;
+  u8 is_back_from_match;  // Back from the room's match, which the room is still settling
   u8 should_exit;
 } Room_Data;
 
@@ -150,6 +152,9 @@ void ShowConfirm();
 void HandleConfirmInputs(u64 downInputs);
 void HandleStageInputs(u64 downInputs, u64 scrollInputs);
 void LeaveRoom();
+void StartPractice();
+u8 CanWatch();
+void WatchMatch();
 void CObjThink(GOBJ *gobj);
 void InputsThink(GOBJ *gobj);
 

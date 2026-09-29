@@ -47,6 +47,9 @@
 #define PILL_SHIFT 0.149
 #define LIST_ROWS 9
 
+// The public rooms plus the room to rejoin, which the list scrolls through LIST_ROWS at a time
+#define ROOM_SLOTS (ROOM_LIST_MAX + 1)
+
 // Create and join form layout. Choices and digits are spread evenly between
 // FORM_LEFT_X and FORM_RIGHT_X, and BAR_CENTER_X is the middle of a row's bar
 #define FORM_LEFT_X -9.7
@@ -79,7 +82,7 @@
 // How often the public room list is refreshed while it's shown
 #define LIST_REFRESH_FRAMES (60 * 5)
 
-// The rooms directory doesn't store a room's region yet
+// Rooms from countries outside the listed regions have none
 #define REGION_UNKNOWN 0xFF
 
 typedef enum Rooms_Screen {
@@ -147,6 +150,7 @@ typedef struct Rooms_Room {
 
 typedef struct Rooms_Data {
   Rooms_SceneData *scene_data;
+  ExiSlippi_FetchRoomList_Query *fetch_query;
   ExiSlippi_GetRoomList_Query *list_query;
   ExiSlippi_GetRoomList_Response *list;
   u8 list_status;
@@ -175,8 +179,9 @@ typedef struct Rooms_Data {
   Rooms_Focus focus;
   Rooms_PillRow pill_row;
   int pill_idx;
-  int row_idx;
-  int visible[LIST_ROWS];
+  int row_idx;  // Index into visible, not the row on screen
+  int scroll;   // The first visible room, shown on the top row
+  int visible[ROOM_SLOTS];
   int visible_count;
   int setting_idx;
   int choices[CREATE_SETTINGS];
@@ -203,11 +208,13 @@ Text *CreateSlotText(int row, int count, float scale_x);
 Text *CreateKeypadText(int row);
 void SetRowPos(JOBJ *jobj, float row);
 u8 IsPillOn(int idx);
+u8 IsChoiceEnabled(int setting, int choice);
 int PillCount();
 void UpdatePills();
 void ClearRow(int row);
 void ClearListArea();
 void PlaceModel(JOBJ *jobj, float row, float x, float scale_x);
+void FilterRooms();
 void UpdateList();
 void UpdateCreate();
 void UpdateEntry(Text *text, int row, int first, int count);
