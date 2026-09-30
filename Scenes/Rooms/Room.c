@@ -29,6 +29,20 @@ static char *stage_names[ROOM_STAGE_COUNT] = {
     "Pokemon Stadium",
 };
 
+// The room's playlist. A song is picked at random each time the room opens, including after a match
+static u8 room_songs[] = {
+    0x25,  // howto_s.hps, How to Play
+    0x53,  // target.hps, Target Test
+    0x00,  // 1p_qk.hps, All-Star
+    0x01,  // akaneia.hps
+    0x1e,  // flatzone.hps
+    0x1f,  // fourside.hps
+    0x33,  // kraid.hps
+    0x4c,  // siren.hps
+    0x5d,  // vs_hyou1.hps, the tournament theme Ranked plays
+    0x5e,  // vs_hyou2.hps, the other one
+};
+
 // Indexed by ExiSlippi_RoomError
 static char *join_errors[] = {
     "",
@@ -128,6 +142,7 @@ void minor_load(Rooms_SceneData *minor_data) {
 
   // Prepare text
   data->text = CreateText(0, 1);
+  data->lower_text = CreateText(0, 1);
   data->left_text = CreateText(0, 0);
   data->right_text = CreateText(0, 2);
   data->list_shadow_text = CreateText(list_canvas, 0);
@@ -145,6 +160,8 @@ void minor_load(Rooms_SceneData *minor_data) {
 
   FetchState();
   OnStateChange();
+
+  BGM_Play(room_songs[HSD_Randi(sizeof(room_songs))]);
 }
 
 void minor_think() {
@@ -168,6 +185,20 @@ void minor_think() {
   if (IsInRoom()) {
     UpdateCharPicker();
     HandleMatchHandoff();
+  }
+
+  // Text draws over the models, so the text under the stage hides while the character picker is
+  // open, and so does the list, bars and all
+  u8 is_picker_open = data->char_picker_dialog->state.is_open;
+  if (is_picker_open != data->is_list_hidden) {
+    data->is_list_hidden = is_picker_open;
+    data->lower_text->hidden = is_picker_open;
+    data->list_shadow_text->hidden = is_picker_open;
+    data->list_bold_text->hidden = is_picker_open;
+    data->list_text->hidden = is_picker_open;
+    if (IsInRoom()) {
+      UpdateList();
+    }
   }
 
   // Watchers go straight to the match, the same way its players do
@@ -272,8 +303,8 @@ void InitStage() {
   }
 
   // Win streak, under the winner
-  data->streak_subtext_id = AddSubtext(data->text, STAGE_BOX_LEFT_X * 100, 130, 3, "");
-  Text_SetColor(data->text, data->streak_subtext_id, &warn_color);
+  data->streak_subtext_id = AddSubtext(data->lower_text, STAGE_BOX_LEFT_X * 100, 130, 3, "");
+  Text_SetColor(data->lower_text, data->streak_subtext_id, &warn_color);
 
   data->stage_selector = CSBoxSelector_Init(gui_assets);
   CSBoxSelector_SetPos(data->stage_selector, (Vec3){STAGE_CENTER_X, STAGE_BOX_Y, 0});
@@ -287,9 +318,9 @@ void InitStage() {
   }
 
   data->vs_subtext_id = AddSubtext(data->text, STAGE_CENTER_X * 100, -330, 5, "VS");
-  data->status_subtext_id = AddSubtext(data->text, STAGE_CENTER_X * 100, 520, 3.5, "");
-  Text_SetColor(data->text, data->status_subtext_id, &dim_color);
-  data->watch_subtext_id = AddSubtext(data->text, STAGE_CENTER_X * 100, 325, 3.2, "");
+  data->status_subtext_id = AddSubtext(data->lower_text, STAGE_CENTER_X * 100, 520, 3.5, "");
+  Text_SetColor(data->lower_text, data->status_subtext_id, &dim_color);
+  data->watch_subtext_id = AddSubtext(data->lower_text, STAGE_CENTER_X * 100, 325, 3.2, "");
 }
 
 // The queue, followed by the rest of the room. Each player gets a bar behind their name
@@ -309,7 +340,7 @@ void InitList() {
 // Button prompts in the bottom panel
 void InitPrompts() {
   for (int i = 0; i < 3; i++) {
-    data->prompt_subtext_ids[i] = AddSubtext(data->text, (i - 1) * PROMPT_GAP_X, 1640, 3.6, "");
+    data->prompt_subtext_ids[i] = AddSubtext(data->lower_text, (i - 1) * PROMPT_GAP_X, 1640, 3.6, "");
   }
 }
 
@@ -359,7 +390,7 @@ void SetListLine(int line, const GXColor *color, char *str) {
 }
 
 void ShowListBar(int line, u8 is_shown) {
-  if (is_shown) {
+  if (is_shown && !data->is_list_hidden) {
     JOBJ_ClearFlagsAll(data->list_bars[line], JOBJ_HIDDEN);
   } else {
     JOBJ_SetFlagsAll(data->list_bars[line], JOBJ_HIDDEN);
@@ -532,15 +563,15 @@ void UpdateJoining() {
     CSBoxSelector_SetVisibility(data->stage_strike_selectors[i], false);
   }
   Text_SetText(data->text, data->vs_subtext_id, "");
-  Text_SetText(data->text, data->streak_subtext_id, "");
+  Text_SetText(data->lower_text, data->streak_subtext_id, "");
   Text_SetText(data->text, data->timer_subtext_id, "");
-  Text_SetText(data->text, data->watch_subtext_id, "");
+  Text_SetText(data->lower_text, data->watch_subtext_id, "");
 
   u8 error = state->connection_error < sizeof(join_errors) / sizeof(join_errors[0]) ? state->connection_error : 0;
   if (is_failed) {
-    Text_SetText(data->text, data->status_subtext_id, "%s", join_errors[error]);
+    Text_SetText(data->lower_text, data->status_subtext_id, "%s", join_errors[error]);
   } else {
-    Text_SetText(data->text, data->status_subtext_id, "Joining room %s", state->code);
+    Text_SetText(data->lower_text, data->status_subtext_id, "Joining room %s", state->code);
   }
 
   for (int i = 0; i < LIST_LINES; i++) {
@@ -552,9 +583,9 @@ void UpdateJoining() {
     ShowConfirm();
     return;
   }
-  Text_SetText(data->text, data->prompt_subtext_ids[0], "");
-  Text_SetText(data->text, data->prompt_subtext_ids[1], is_failed ? "B  Back" : "Hold B  Leave");
-  Text_SetText(data->text, data->prompt_subtext_ids[2], "");
+  Text_SetText(data->lower_text, data->prompt_subtext_ids[0], "");
+  Text_SetText(data->lower_text, data->prompt_subtext_ids[1], is_failed ? "B  Back" : "Hold B  Leave");
+  Text_SetText(data->lower_text, data->prompt_subtext_ids[2], "");
 }
 
 void UpdateStage() {
@@ -602,11 +633,11 @@ void UpdateStage() {
   }
 
   if (state->sides[Room_Side_WINNER] < 0 || state->streak == 0 || is_drafting) {
-    Text_SetText(data->text, data->streak_subtext_id, "");
+    Text_SetText(data->lower_text, data->streak_subtext_id, "");
   } else if (state->streak == 1) {
-    Text_SetText(data->text, data->streak_subtext_id, "Won the last set");
+    Text_SetText(data->lower_text, data->streak_subtext_id, "Won the last set");
   } else {
-    Text_SetText(data->text, data->streak_subtext_id, "Won %d in a row", state->streak);
+    Text_SetText(data->lower_text, data->streak_subtext_id, "Won %d in a row", state->streak);
   }
 
   // Show the stage between the players once it's decided
@@ -675,12 +706,12 @@ void UpdateStage() {
   } else {
     sprintf(status, "Waiting for players");
   }
-  Text_SetText(data->text, data->status_subtext_id, "%s", status);
+  Text_SetText(data->lower_text, data->status_subtext_id, "%s", status);
 
   // Watching is offered between the match and its status while it's being played, and again after a
   // watch failed
   u8 show_watch = CanWatch() && state->watch_status != ExiSlippi_WatchStatus_CONNECTING;
-  Text_SetText(data->text, data->watch_subtext_id, show_watch ? "Y  Watch" : "");
+  Text_SetText(data->lower_text, data->watch_subtext_id, show_watch ? "Y  Watch" : "");
 }
 
 void UpdatePrompts() {
@@ -704,7 +735,7 @@ void UpdatePrompts() {
   prompts[2] = state->phase == Room_Phase_PLAYING ? "L R  Pick the winner" : "L  Add a player";
 #endif
   for (int i = 0; i < 3; i++) {
-    Text_SetText(data->text, data->prompt_subtext_ids[i], prompts[i]);
+    Text_SetText(data->lower_text, data->prompt_subtext_ids[i], prompts[i]);
   }
 }
 
@@ -1001,7 +1032,7 @@ void HandleHoldInputs(u64 heldInputs) {
       col.g += (warn_color.g - text_color.g) * t;
       col.b += (warn_color.b - text_color.b) * t;
     }
-    Text_SetColor(data->text, data->prompt_subtext_ids[i], &col);
+    Text_SetColor(data->lower_text, data->prompt_subtext_ids[i], &col);
   }
 
   if (idx < 0 || ++data->hold_frames < HOLD_FRAMES) {
@@ -1017,11 +1048,11 @@ void HandleHoldInputs(u64 heldInputs) {
 // A finished hold is only acted on once A confirms it
 void ShowConfirm() {
   char *actions[2] = {"A  Leave the queue", "A  Leave the room"};
-  Text_SetText(data->text, data->prompt_subtext_ids[0], actions[data->confirm_idx]);
-  Text_SetText(data->text, data->prompt_subtext_ids[1], "B  Stay");
-  Text_SetText(data->text, data->prompt_subtext_ids[2], "");
+  Text_SetText(data->lower_text, data->prompt_subtext_ids[0], actions[data->confirm_idx]);
+  Text_SetText(data->lower_text, data->prompt_subtext_ids[1], "B  Stay");
+  Text_SetText(data->lower_text, data->prompt_subtext_ids[2], "");
   for (int i = 0; i < 3; i++) {
-    Text_SetColor(data->text, data->prompt_subtext_ids[i], &text_color);
+    Text_SetColor(data->lower_text, data->prompt_subtext_ids[i], &text_color);
   }
 }
 

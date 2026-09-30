@@ -93,12 +93,14 @@ typedef struct Room_Data {
   ExiSlippi_RoomAction_Query *action_query;
   ExiSlippi_MatchState_Response *match_state;
   Text *text;
+  Text *lower_text;  // The streak, status, watch line and prompts, under the character picker
   Text *left_text;
   Text *right_text;
   Text *list_text;
   Text *list_shadow_text;
   Text *list_bold_text;
   JOBJ *list_bars[LIST_LINES];
+  u8 is_list_hidden;  // While the character picker is open
   int name_subtext_ids[2];
   int password_subtext_id;
   int code_subtext_id;
