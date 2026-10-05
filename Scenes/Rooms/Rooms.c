@@ -760,8 +760,12 @@ void PollRoomList() {
   for (int i = 0; i < data->list->count && room_count < ROOM_SLOTS; i++) {
     ExiSlippi_RoomListing *l = &data->list->rooms[i];
 
-    // A public room being rejoined is already listed first
+    // A public room being rejoined is already listed first. A room with a mode this build doesn't
+    // know isn't listed at all
     if (room_count > 0 && rooms[0].is_rejoin && memcmp(l->code, rooms[0].code, CODE_DIGITS) == 0) {
+      continue;
+    }
+    if (l->mode >= PILL_COUNT) {
       continue;
     }
 

@@ -545,8 +545,11 @@ void UpdateHeader() {
     return;
   }
 
-  Text_SetText(data->right_text, data->mode_subtext_id, mode_labels[state->mode]);
-  Text_SetText(data->right_text, data->stage_mode_subtext_id, stage_labels[state->stage_mode]);
+  // Dolphin only sends modes it knows, but they index the labels, so they're checked anyway
+  u8 is_mode_known = state->mode < sizeof(mode_labels) / sizeof(mode_labels[0]);
+  u8 is_stage_mode_known = state->stage_mode < sizeof(stage_labels) / sizeof(stage_labels[0]);
+  Text_SetText(data->right_text, data->mode_subtext_id, is_mode_known ? mode_labels[state->mode] : "");
+  Text_SetText(data->right_text, data->stage_mode_subtext_id, is_stage_mode_known ? stage_labels[state->stage_mode] : "");
 }
 
 // Shows the join happening, or why it didn't work
